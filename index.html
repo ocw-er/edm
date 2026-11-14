@@ -845,6 +845,7 @@ function markDirty(){ dirty = true; $('#railSaved').textContent = 'Unsaved chang
 function scheduleSave(){ clearTimeout(saveTimer); saveTimer = setTimeout(persist, 400); }
 async function persist(){
   if(!PW) return;
+  if(isAdmin()) return persistAdmin();
   if(saving) { scheduleSave(); return; }
   saving = true;
   try {
@@ -1517,6 +1518,7 @@ function openDrawer(id, edit){
   d.innerHTML = edit ? editorHTML(e) : detailHTML(e);
   d.classList.add('on'); d.setAttribute('aria-hidden','false');
   $('#scrim').classList.add('on'); document.body.style.overflow = 'hidden';
+  if(typeof adminHideFields === 'function') adminHideFields(d);
   if(edit){ const f = d.querySelector('input'); if(f) f.focus(); }
 }
 function closeDrawer(){ $('#drawer').classList.remove('on'); $('#drawer').setAttribute('aria-hidden','true'); $('#scrim').classList.remove('on'); document.body.style.overflow = ''; UI.drawerId = null; }
@@ -2357,9 +2359,12 @@ function renderAllBase(){
   $('#viewTitle').innerHTML = t[0]; $('#viewEyebrow').textContent = t[1];
   document.title = t[2] + ' · Employee register';
   if(v==='payslips'){ try{ renderPayslips(); }catch(e){ console.error(e); } applyRoleChrome(); if(typeof paintEdm==='function') paintEdm(); updateChrome(); return; }
-  if(ROLE === 'self'){ if(v === 'self-claims'){ renderMyClaims(); } else { renderSelfPage(v); if(v === 'self-profile') appendSelfConsent(); } } else { ({ dashboard:renderDashboard, employees:renderEmployees, handbook:renderHandbook, payroll:renderPayroll, compliance:renderCompliance, organisation:renderOrg, claims:renderClaims, registers:function(){ renderRegisters(); if(typeof hrInboxMount === 'function') hrInboxMount(); }, activity:renderActivity, settings:renderSettings, 'self-claims':renderMyClaims })[v](); }
+  if(ROLE === 'self'){ if(v === 'self-claims'){ renderMyClaims(); } else { renderSelfPage(v); if(v === 'self-profile') appendSelfConsent(); } } else { ({ dashboard:renderDashboard, employees:renderEmployees, handbook:renderHandbook, payroll:renderPayroll, compliance:renderCompliance, organisation:renderOrg, claims:renderClaims, registers:function(){ renderRegisters(); if(typeof hrInboxMount === 'function') hrInboxMount(); if(typeof aqInboxMount === 'function') aqInboxMount(); },
+ activity:renderActivity, settings:function(){ renderSettings(); if(typeof settingsAdminMount === 'function') settingsAdminMount(); }, 'self-claims':renderMyClaims })[v](); }
   applyRoleChrome();
   if(typeof selfSyncBar === 'function') selfSyncBar();
+  if(typeof adminBar === 'function') adminBar();
+  if(typeof adminRedactDash === 'function') adminRedactDash();
   if(typeof paintEdm === 'function') paintEdm();
   updateChrome();
 }
@@ -2434,6 +2439,7 @@ async function unlockRegister(){
     PW = pw; lockAttempts = 0;
     enterApp();
   } catch(err){
+    if(adminBlobGet() && await unlockAdmin(pw)){ lockAttempts = 0; return; }
     lockAttempts++;
     secNote('HR sign-in failed', 'Wrong password · attempt ' + lockAttempts + ' of 5');
     if(lockAttempts >= 5){ cooldownUntil = Date.now() + 30000; lockAttempts = 0; }
@@ -2523,6 +2529,18 @@ document.addEventListener('click', ev => {
     case 'goto-settings': closeModal(); go('settings'); break;
     case 'goto-payslips': go('payslips'); break;
     case 'enrol-copy': copyEnrolPacket(); break;
+    case 'admin-send': adminSendStart(); break;
+    case 'admin-send-1': adminSendStart(); break;
+    case 'admin-send-2': adminSendConfirm(); break;
+    case 'admin-send-go': adminSendGo(); break;
+    case 'admin-create': adminCreateModal(); break;
+    case 'admin-create-go': adminCreateGo(); break;
+    case 'admin-revoke': adminRevoke(); break;
+    case 'aq-pick': { const f = document.getElementById('aqFile'); if(f) f.click(); break; }
+    case 'aq-scan': adminScanFolder(); break;
+    case 'aq-review': adminReviewPacket(AQ_FILES[el.dataset.name] || '', el.dataset.name); break;
+    case 'aq-apply-1': adminApplyConfirm(); break;
+    case 'aq-apply-2': adminApplyGo(); break;
     case 'self-send': selfSendStart(); break;
     case 'self-send-1': selfSendStart(); break;
     case 'self-send-2': selfSendConfirm(); break;
@@ -2687,6 +2705,7 @@ function openEditorNew(){
   d.innerHTML = editorHTML(blankEmp());
   d.classList.add('on'); d.setAttribute('aria-hidden','false');
   $('#scrim').classList.add('on'); document.body.style.overflow = 'hidden';
+  if(typeof adminHideFields === 'function') adminHideFields(d);
   const f = d.querySelector('input'); if(f) f.focus();
 }
 
@@ -2948,7 +2967,8 @@ function applyRoleChrome(){
   }
   $$('#nav button').forEach(b => {
     const v = b.dataset.view;
-    const allowed = self ? SELF_VIEWS.includes(v) : HR_VIEWS.includes(v);
+    const blockedForAdmin = HR_ROLE === 'admin' && (v === 'payroll' || v === 'payslips');
+    const allowed = self ? SELF_VIEWS.includes(v) : (HR_VIEWS.includes(v) && !blockedForAdmin);
     b.style.display = allowed ? '' : 'none';
   });
   const e = self ? state.employees.find(x => x.id === SELF) : null;
@@ -3495,6 +3515,292 @@ function hrInboxMount(){
   host.appendChild(panel);
 }
 
+/* =====================================================================
+   HR TIERS — HR Manager (super user) and HR Admin (no salary, no payslips)
+   The admin key is a different key. Salary fields are absent from the
+   admin copy of the register, so they cannot be decrypted on that door.
+   ===================================================================== */
+const AV = 'rekod.er.admin.v4', AQ_PREFIX = 'ERAQ1.';
+let HR_ROLE = 'manager', AK = null, ADMIN_BASE = null, AQ_PENDING = null;
+const AQ_FILES = {};
+const SALARY_FIELDS = ['basic','allowance','allowanceLabel','bank','bankAcct','claims','extraAllow','salary','bonus','increment'];
+const ADMIN_HIDDEN_FIELDS = ['basic','allowance','allowanceLabel','bank','bankAcct','salary','bonus'];
+const ADMIN_EDITABLE = ['name','position','dept','joinDate','confirmDate','status','nationality','ic','passType','passNo','passExpiry','levyAmount','phone','email','address','marital','children','epfNo','socsoNo','taxNo','ecName','ecPhone','ecRelation','empNo','seat','notes'];
+function isAdmin(){ return ROLE === 'hr' && HR_ROLE === 'admin'; }
+function adminBlobGet(){ try { const s = localStorage.getItem(AV); return s ? JSON.parse(s) : null; } catch(e){ return null; } }
+function adminBlobPut(b){ try { localStorage.setItem(AV, JSON.stringify(b)); return true; } catch(e){ return false; } }
+function redactState(s){
+  const c = JSON.parse(JSON.stringify(s));
+  (c.employees || []).forEach(function(e){ SALARY_FIELDS.forEach(function(k){ delete e[k]; }); });
+  c.log = (c.log || []).filter(function(l){ return !/RM\s?\d/.test(String(l.detail || '') + ' ' + String(l.target || '')); });
+  c.redacted = true;
+  return c;
+}
+function adminHideFields(root){
+  if(!isAdmin() || !root) return;
+  ADMIN_HIDDEN_FIELDS.forEach(function(k){
+    const inp = root.querySelector('[data-f="' + k + '"]');
+    if(inp){ const f = inp.closest('.field'); if(f) f.style.display = 'none'; }
+  });
+  Array.prototype.forEach.call(root.querySelectorAll('fieldset'), function(f){ const lg = f.querySelector('legend'); if(lg && /salary|payroll|bank/i.test(lg.textContent)) f.style.display = 'none'; });
+}
+function adminRedactDash(){
+  if(!isAdmin()) return;
+  const v = document.getElementById('view-dashboard'); if(!v) return;
+  const stats = v.querySelectorAll('.stat');
+  [1, 2].forEach(function(i){ if(stats[i] && stats[i].parentNode) stats[i].remove(); });
+  Array.prototype.forEach.call(v.querySelectorAll('.panel'), function(pn){
+    const h = pn.querySelector('h2');
+    if(h && /statutory|payroll cost/i.test(h.textContent)) pn.remove();
+  });
+  Array.prototype.forEach.call(v.querySelectorAll('.note'), function(nw){ if(/minimum wage/i.test(nw.textContent)) nw.remove(); });
+}
+async function createAdminAccess(pw){
+  if(!MK) throw new Error('no master key');
+  if(!AK) AK = await crypto.subtle.generateKey({ name:'AES-GCM', length:256 }, true, ['encrypt','decrypt']);
+  const raw = await crypto.subtle.exportKey('raw', AK);
+  const hw = await wrapRaw(MK, raw);
+  state.adminKey = { iv:hw.iv, ct:hw.ct, at:nowLocalISO() };
+  const salt = toB64(rnd(16));
+  const kek = await deriveKey(pw, fromB64(salt), 250000);
+  const w = await wrapRaw(kek, raw);
+  const sealed = await sealWith(AK, redactState(state));
+  const blob = { v:1, salt:salt, iv:w.iv, ct:w.ct, iter:250000, div:sealed.iv, dct:sealed.ct, madeAt:nowLocalISO(), by:(state.company && state.company.hrAdmin) || 'HR' };
+  const ok = adminBlobPut(blob);
+  await persist();
+  logAction('HR Admin access created', 'Restricted door', 'Salary and payslip access withheld');
+  return ok;
+}
+async function unlockAdmin(pw){
+  const b = adminBlobGet(); if(!b) return false;
+  try {
+    const kek = await deriveKey(pw, fromB64(b.salt), b.iter || 250000);
+    AK = await unwrapRaw(kek, { iv:b.iv, ct:b.ct });
+    const red = await openWith(AK, { iv:b.div, ct:b.dct });
+    state = Object.assign(blankState(), red);
+    state.employees = (state.employees || []).map(function(e){ return Object.assign(blankEmp(), e, { docs:Object.assign({}, blankEmp().docs, e.docs || {}), hbAcks:e.hbAcks || [] }); });
+    state.settings = Object.assign(blankState().settings, state.settings || {});
+    state.company = Object.assign(blankState().company, state.company || {});
+    state.log = state.log || [];
+    ROLE = 'hr'; HR_ROLE = 'admin'; PW = pw; MK = null;
+    ADMIN_BASE = adminSnapshot(); dirty = false;
+    enterApp();
+    toast('Signed in as HR Admin - salary and payslips are not available');
+    return true;
+  } catch(e){ return false; }
+}
+function adminSnapshot(){
+  const o = {};
+  (state.employees || []).forEach(function(e){
+    const rec = {};
+    ADMIN_EDITABLE.forEach(function(k){ rec[k] = (e[k] === undefined ? '' : String(e[k])); });
+    o[e.id] = rec;
+  });
+  return o;
+}
+function adminPendingRows(){
+  if(!isAdmin() || !ADMIN_BASE) return [];
+  const rows = [];
+  (state.employees || []).forEach(function(e){
+    const base = ADMIN_BASE[e.id];
+    if(!base){ rows.push({ emp:e.name, label:'New employee', from:'-', to:e.name }); return; }
+    ADMIN_EDITABLE.forEach(function(k){
+      const cur = (e[k] === undefined ? '' : String(e[k]));
+      if(cur !== base[k]) rows.push({ emp:e.name, label:(typeof CHG_LABEL !== 'undefined' && CHG_LABEL[k]) || k, from:base[k], to:cur });
+    });
+  });
+  return rows;
+}
+async function persistAdmin(){
+  if(!AK) return;
+  try {
+    const sealed = await sealWith(AK, redactState(state));
+    const b = adminBlobGet() || {};
+    b.div = sealed.iv; b.dct = sealed.ct; b.savedAt = nowLocalISO();
+    adminBlobPut(b);
+    dirty = false;
+    const t = new Date();
+    const rs = $('#railSaved'); if(rs) rs.textContent = 'Saved locally (admin) - ' + String(t.getHours()).padStart(2,'0') + ':' + String(t.getMinutes()).padStart(2,'0');
+  } catch(e){ toast('Could not save your working copy'); }
+}
+function adminBar(){
+  if(!isAdmin()){ const b = document.getElementById('adminBar'); if(b) b.remove(); return; }
+  let bar = document.getElementById('adminBar');
+  if(!bar){
+    bar = document.createElement('div');
+    bar.id = 'adminBar';
+    bar.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:80;display:flex;gap:8px;align-items:center;background:var(--card);border:1px solid var(--line-strong);border-radius:3px;padding:7px 9px;box-shadow:0 18px 40px -24px rgba(11,36,64,.6)';
+    bar.innerHTML = '<span class="ref" style="margin:0">HR Admin - no salary access</span><button class="btn btn-sm btn-primary" data-action="admin-send" id="adminSendBtn">Send to manager</button>';
+    document.body.appendChild(bar);
+  }
+  const n = adminPendingRows().length;
+  const btn = document.getElementById('adminSendBtn');
+  if(btn){ btn.textContent = n ? 'Send to manager (' + n + ')' : 'Send to manager'; btn.disabled = !n; }
+}
+function adminRowsTable(rows){
+  return '<table class="reg"><thead><tr><th>Employee</th><th>Field</th><th>Before</th><th>After</th></tr></thead><tbody>' +
+    rows.map(function(r){ return '<tr><td>' + esc(r.emp || '') + '</td><td><b>' + esc(r.label) + '</b></td><td class="mono dim">' + esc(String(r.from)) + '</td><td class="mono"><b style="color:var(--green)">' + esc(String(r.to)) + '</b></td></tr>'; }).join('') + '</tbody></table>';
+}
+function adminSendStart(){
+  const rows = adminPendingRows();
+  if(!rows.length){ toast('No changes to send'); return; }
+  openModal('Step 1 of 2 - Review your changes',
+    '<p class="tiny dim" style="margin-top:0">Only the fields listed leave this device. Salary, allowances and bank details are not held on the admin door and cannot be changed from it.</p>' + adminRowsTable(rows),
+    '<button class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="admin-send-2">Confirm these changes</button>');
+}
+function adminSendConfirm(){
+  const rows = adminPendingRows();
+  if(!rows.length){ toast('No changes left to send'); return; }
+  openModal('Step 2 of 2 - Send to the HR Manager',
+    '<p class="tiny dim" style="margin-top:0">' + rows.length + ' field(s) will be sealed and handed to the manager, who must accept them before the register changes. Your working copy stays on this device only.</p>' + adminRowsTable(rows),
+    '<button class="btn" data-action="admin-send-1">Back</button><button class="btn btn-primary" data-action="admin-send-go">Send now</button>');
+}
+async function adminSendGo(){
+  if(!AK || !state.adminKey){ toast('No admin key on this device'); return; }
+  const rows = adminPendingRows();
+  const sealed = await sealWith(AK, redactState(state));
+  const pkt = { v:1, kind:'adminq', by:(state.company && state.company.adminName) || 'HR Admin', at:nowLocalISO(), dev:deviceTag(), n:rows.length, key:state.adminKey, red:sealed };
+  const text = AQ_PREFIX + toB64(enc.encode(JSON.stringify(pkt)));
+  const base = 'admin-changes-' + todayYMD() + '-' + String(Date.now()).slice(-5) + '.eraq';
+  let where = '';
+  try {
+    const h = await idbGet('self-out-handle');
+    if(h && h.getFileHandle){
+      const fh = await h.getFileHandle(base, { create:true });
+      const w = await fh.createWritable(); await w.write(new Blob([text], { type:'text/plain' })); await w.close();
+      where = 'written to ' + (h.name || 'folder') + ' / ' + base;
+    }
+  } catch(e){ where = ''; }
+  if(!where){ downloadText(base, text); where = 'downloaded as ' + base; }
+  ADMIN_BASE = adminSnapshot();
+  logAction('Admin changes sent for approval', rows.length + ' field(s)', base);
+  closeModal(); renderAll();
+  toast('Sent - ' + where + '. The manager must accept it.');
+}
+async function adminReviewPacket(text, fname){
+  if(isAdmin()){ toast('Only the HR Manager can accept admin changes'); return; }
+  let t = String(text || '').replace(/\s+/g, '');
+  if(t.indexOf(AQ_PREFIX) === 0) t = t.slice(AQ_PREFIX.length);
+  let pkt;
+  try { pkt = JSON.parse(dec.decode(fromB64(t))); } catch(e){ toast('That is not a valid admin packet'); return; }
+  if(!pkt || pkt.kind !== 'adminq' || !pkt.red || !pkt.key){ toast('That is not a valid admin packet'); return; }
+  if(!MK){ toast('Unlock with the manager password first'); return; }
+  let ak, red;
+  try { ak = await unwrapRaw(MK, { iv:pkt.key.iv, ct:pkt.key.ct }); red = await openWith(ak, pkt.red); }
+  catch(e){ toast('That packet was sealed with a different admin key'); return; }
+  const rows = [];
+  (red.employees || []).forEach(function(re){
+    const live = state.employees.find(function(x){ return x.id === re.id; });
+    if(!live){ rows.push({ emp:re.name, label:'New employee', from:'-', to:re.name }); return; }
+    ADMIN_EDITABLE.forEach(function(k){
+      const a = (live[k] === undefined ? '' : String(live[k]));
+      const b = (re[k] === undefined ? '' : String(re[k]));
+      if(a !== b) rows.push({ emp:re.name, label:(typeof CHG_LABEL !== 'undefined' && CHG_LABEL[k]) || k, from:a, to:b });
+    });
+  });
+  if(!rows.length){ toast('No differences against the register'); return; }
+  AQ_PENDING = { pkt:pkt, red:red, rows:rows, fname:fname };
+  openModal('Step 1 of 2 - Review admin changes',
+    '<p class="tiny dim" style="margin-top:0">Sent by <b>' + esc(pkt.by) + '</b> at ' + esc(fmtDateTime(pkt.at || '')) + ' - ' + esc(fname || 'packet') + '. Nothing has been written to the register yet.</p>' + adminRowsTable(rows),
+    '<button class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="aq-apply-1">Confirm these changes</button>');
+}
+function adminApplyConfirm(){
+  const s = AQ_PENDING; if(!s){ toast('Nothing to apply'); return; }
+  openModal('Step 2 of 2 - Write to the register',
+    '<p class="tiny dim" style="margin-top:0">' + s.rows.length + ' field(s) will replace register values, the change is logged, and the EDM file is updated. Salary fields are not in the packet and stay untouched.</p>' + adminRowsTable(s.rows),
+    '<button class="btn" data-action="aq-apply-1">Back</button><button class="btn btn-primary" data-action="aq-apply-2">Apply and sync</button>');
+}
+async function adminApplyGo(){
+  const s = AQ_PENDING; if(!s){ toast('Nothing to apply'); return; }
+  let n = 0;
+  (s.red.employees || []).forEach(function(re){
+    const live = state.employees.find(function(x){ return x.id === re.id; });
+    if(!live) return;
+    ADMIN_EDITABLE.forEach(function(k){
+      if(re[k] !== undefined && String(live[k] === undefined ? '' : live[k]) !== String(re[k])){ live[k] = re[k]; n++; }
+    });
+  });
+  logAction('Admin changes applied', s.pkt.by || 'HR Admin', n + ' field(s) - ' + (s.fname || 'packet'));
+  await persist(); await edmPush();
+  if(s.fname && EDM.handle && EDM.handle.removeEntry && /\.eraq$/i.test(s.fname)){ try { await EDM.handle.removeEntry(s.fname); } catch(e){} }
+  closeModal(); AQ_PENDING = null; renderAll();
+  toast('Applied ' + n + ' change(s)');
+}
+async function adminScanFolder(){
+  if(!EDM.handle || !EDM.handle.entries){ toast('Link the EDM folder first'); return; }
+  const list = [];
+  for await (const entry of EDM.handle.entries()){
+    if(/\.eraq$/i.test(entry[0])){ try { list.push({ name:entry[0], text:await (await entry[1].getFile()).text() }); } catch(e){} }
+  }
+  const host = document.getElementById('aqList'); if(!host) return;
+  if(!list.length){ host.innerHTML = '<p class="tiny dim" style="margin:0">No admin packets in the folder.</p>'; toast('No admin packets found'); return; }
+  host.innerHTML = '<table class="reg"><tbody>' + list.map(function(f){
+    AQ_FILES[f.name] = f.text;
+    return '<tr><td class="mono">' + esc(f.name) + '</td><td class="r"><button class="btn btn-sm btn-primary" data-action="aq-review" data-name="' + esc(f.name) + '">Review</button></td></tr>';
+  }).join('') + '</tbody></table>';
+  toast(list.length + ' admin packet(s) found');
+}
+function aqInboxMount(){
+  const host = document.getElementById('view-registers');
+  if(!host || ROLE === 'self' || isAdmin() || document.getElementById('aqInbox')) return;
+  const panel = document.createElement('div');
+  panel.id = 'aqInbox'; panel.className = 'panel'; panel.style.marginTop = '14px';
+  panel.innerHTML = '<div class="panel-h"><h2>HR Admin changes <span class="tag">needs manager approval</span></h2><div style="display:flex;gap:6px;flex-wrap:wrap"><input type="file" id="aqFile" accept=".eraq,text/plain" class="hide" onchange="pickAqFile(this)"><button class="btn btn-sm" data-action="aq-pick">Open packet file</button><button class="btn btn-sm btn-primary" data-action="aq-scan">Scan EDM folder</button></div></div>' +
+    '<div class="panel-b" id="aqList"><p class="tiny dim" style="margin:0">HR Admin edits arrive sealed and are applied only after you confirm twice. Salary fields never appear in these packets.</p></div>';
+  host.appendChild(panel);
+}
+function pickAqFile(inp){
+  const f = inp.files && inp.files[0]; if(!f) return;
+  const r = new FileReader();
+  r.onload = function(){ adminReviewPacket(String(r.result || ''), f.name); };
+  r.readAsText(f);
+}
+function settingsAdminMount(){
+  const host = document.getElementById('view-settings');
+  if(!host || ROLE === 'self' || document.getElementById('adminAccessPanel')) return;
+  const b = adminBlobGet();
+  const panel = document.createElement('div');
+  panel.id = 'adminAccessPanel'; panel.className = 'panel'; panel.style.marginTop = '14px';
+  panel.innerHTML = '<div class="panel-h"><h2>HR access levels</h2><span class="ref">' + (b ? 'Admin door active' : 'Manager only') + '</span></div><div class="panel-b">' +
+    '<p class="tiny dim" style="margin-top:0">Two HR logins. <b>HR Manager</b> - full register, salary and payslips. <b>HR Admin</b> - recruitment, records, compliance and documents, with salary and payslips not held on that door at all.</p>' +
+    '<table class="reg"><thead><tr><th>Door</th><th>Can see</th><th>Cannot see</th></tr></thead><tbody>' +
+    '<tr><td><b>HR Manager</b><span class="sub">super user</span></td><td>Everything: salary, payslips, statutory, reports</td><td>nothing</td></tr>' +
+    '<tr><td><b>HR Admin</b><span class="sub">restricted</span></td><td>Employees, organisation, compliance, handbook, claims, registers, documents</td><td>Salary, payslips, payroll figures, bank details</td></tr>' +
+    '</tbody></table>' +
+    (b ? '<div class="note" style="margin-top:10px">Admin access created ' + esc(fmtDate(String(b.madeAt || '').slice(0,10))) + '. Setting a new admin password re-wraps the admin key - salary data still is not included.</div>' : '') +
+    '<div class="split-line" style="margin-top:12px"><button class="btn ' + (b ? '' : 'btn-primary') + '" data-action="admin-create">' + (b ? 'Set a new admin password' : 'Create HR Admin access') + '</button>' + (b ? '<button class="btn btn-ghost" data-action="admin-revoke">Revoke admin access</button>' : '') + '</div>' +
+    '</div>';
+  host.appendChild(panel);
+}
+function adminCreateModal(){
+  const b = adminBlobGet();
+  openModal(b ? 'Set a new HR Admin password' : 'Create HR Admin access',
+    '<p class="tiny dim" style="margin-top:0">The admin door gets its own key. It opens a copy of the register with salary, allowances and bank details removed - not hidden, absent - so those values cannot be read from that door.</p>' +
+    '<div class="field"><label>Admin name (stamped on their changes)</label><input id="adName" value="' + esc((state.company && state.company.adminName) || 'HR Admin') + '"></div>' +
+    '<div class="form-grid" style="grid-template-columns:1fr 1fr"><div class="field"><label>Admin password</label><input id="adPw1" type="password" autocomplete="new-password"></div><div class="field"><label>Repeat</label><input id="adPw2" type="password" autocomplete="new-password"></div></div>' +
+    '<div class="note">Give this password to the admin directly. You cannot read it later, and they cannot read the salaries with it.</div>',
+    '<button class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="admin-create-go">' + (b ? 'Re-wrap admin key' : 'Create admin access') + '</button>');
+}
+async function adminCreateGo(){
+  const pw = ($('#adPw1').value || ''), pw2 = ($('#adPw2').value || '');
+  const nm = ($('#adName').value || '').trim();
+  if(pw.length < 10){ toast('Admin password must be at least 10 characters'); return; }
+  if(pw !== pw2){ toast('The two passwords do not match'); return; }
+  try {
+    state.company.adminName = nm || 'HR Admin';
+    await createAdminAccess(pw);
+    closeModal(); renderAll();
+    toast('Admin door ready - sign in with that password on the HR door');
+  } catch(e){ toast('Could not create admin access: ' + e.message); }
+}
+function adminRevoke(){
+  if(!confirm('Revoke HR Admin access? The admin password will stop working on this device.')) return;
+  localStorage.removeItem(AV);
+  if(state.adminKey) delete state.adminKey;
+  logAction('HR Admin access revoked', 'Restricted door', 'Admin key removed from this device');
+  persist().then(function(){ renderAll(); toast('Admin access revoked'); });
+}
+
 async function issueEnrolment(id){
   const e = state.employees.find(x => x.id === id); if(!e) return;
   const a = accessOf(e);
@@ -3819,6 +4125,7 @@ async function unlockRegister(){
     logAction('HR signed in', 'HR / Admin door', 'Full register opened' + (failed ? ' · ' + failed + ' failed attempt(s) on record' : ''), { quiet:true });
     await persist();
   } catch(e){
+    if(adminBlobGet() && await unlockAdmin(pw)){ lockAttempts = 0; return; }
     lockAttempts++;
     if(lockAttempts >= 5){ cooldownUntil = Date.now() + 30000; lockAttempts = 0; }
     err.textContent = 'Wrong password. ' + (5 - lockAttempts) + ' attempt(s) left before a 30-second pause.';
@@ -3853,7 +4160,7 @@ async function lockNow(){
     logAction('Register locked', 'HR / Admin door', 'Locked by user or idle timer', { quiet:true });
     await persist();
   }
-  MK = null; PW = null; RK_CACHE.clear();
+  MK = null; PW = null; AK = null; HR_ROLE = 'manager'; ADMIN_BASE = null; RK_CACHE.clear();
   state = blankState();
   closeDrawer(); closeReader(); closeModal();
   showLock('unlock');
