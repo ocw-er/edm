@@ -2357,8 +2357,9 @@ function renderAllBase(){
   $('#viewTitle').innerHTML = t[0]; $('#viewEyebrow').textContent = t[1];
   document.title = t[2] + ' · Employee register';
   if(v==='payslips'){ try{ renderPayslips(); }catch(e){ console.error(e); } applyRoleChrome(); if(typeof paintEdm==='function') paintEdm(); updateChrome(); return; }
-  if(ROLE === 'self'){ if(v === 'self-claims'){ renderMyClaims(); } else { renderSelfPage(v); if(v === 'self-profile') appendSelfConsent(); } } else { ({ dashboard:renderDashboard, employees:renderEmployees, handbook:renderHandbook, payroll:renderPayroll, compliance:renderCompliance, organisation:renderOrg, claims:renderClaims, registers:renderRegisters, activity:renderActivity, settings:renderSettings, 'self-claims':renderMyClaims })[v](); }
+  if(ROLE === 'self'){ if(v === 'self-claims'){ renderMyClaims(); } else { renderSelfPage(v); if(v === 'self-profile') appendSelfConsent(); } } else { ({ dashboard:renderDashboard, employees:renderEmployees, handbook:renderHandbook, payroll:renderPayroll, compliance:renderCompliance, organisation:renderOrg, claims:renderClaims, registers:function(){ renderRegisters(); if(typeof hrInboxMount === 'function') hrInboxMount(); }, activity:renderActivity, settings:renderSettings, 'self-claims':renderMyClaims })[v](); }
   applyRoleChrome();
+  if(typeof selfSyncBar === 'function') selfSyncBar();
   if(typeof paintEdm === 'function') paintEdm();
   updateChrome();
 }
@@ -2522,6 +2523,16 @@ document.addEventListener('click', ev => {
     case 'goto-settings': closeModal(); go('settings'); break;
     case 'goto-payslips': go('payslips'); break;
     case 'enrol-copy': copyEnrolPacket(); break;
+    case 'self-send': selfSendStart(); break;
+    case 'self-send-1': selfSendStart(); break;
+    case 'self-send-2': selfSendConfirm(); break;
+    case 'self-send-go': selfSendGo(); break;
+    case 'self-link-out': linkReturnFolder(); break;
+    case 'chg-pick': { const f = document.getElementById('chgFile'); if(f) f.click(); break; }
+    case 'chg-scan': chgScan(); break;
+    case 'chg-review': chgReview(CHG_FILES[el.dataset.name] || '', el.dataset.name); break;
+    case 'chg-apply-1': chgApplyConfirm(); break;
+    case 'chg-apply-2': chgApplyGo(); break;
     case 'enrol-download': downloadEnrolPacket(); break;
     case 'ps-attendance': attendanceModal(id); break;
     case 'ps-attendance-save': saveAttendance(id); break;
@@ -3185,13 +3196,14 @@ async function createSelfStore(e, code){
   const kek = await kekOf(selfSecret(e.ic, code), salt, 250000);
   const raw = await crypto.subtle.exportKey('raw', rk);
   const w = await wrapRaw(kek, raw);
-  const blob = { ic: e.ic, name: e.name, psalt: salt, piv: w.iv, pct: w.ct, iter: 250000, pinSet: false, rec: sealed, updatedAt: rec.updatedAt, issuedAt: nowLocalISO() };
+  const hw = await wrapRaw(MK, raw);
+  const blob = { ic: e.ic, name: e.name, psalt: salt, piv: w.iv, pct: w.ct, iter: 250000, pinSet: false, rec: sealed, hiv: hw.iv, hct: hw.ct, updatedAt: rec.updatedAt, issuedAt: nowLocalISO() };
   return selfStorePut(e.ic, blob);
 }
 
 let ENROL_PACKET = '', ENROL_NAME = '';
 function enrolPacketOf(blob){
-  const slim = { v:1, ic:blob.ic, name:blob.name, psalt:blob.psalt, piv:blob.piv, pct:blob.pct, iter:blob.iter || 250000, rec:blob.rec, issuedAt:blob.issuedAt || nowLocalISO() };
+  const slim = { v:1, ic:blob.ic, name:blob.name, psalt:blob.psalt, piv:blob.piv, pct:blob.pct, iter:blob.iter || 250000, rec:blob.rec, hiv:blob.hiv, hct:blob.hct, issuedAt:blob.issuedAt || nowLocalISO() };
   return 'EREN1.' + toB64(enc.encode(JSON.stringify(slim)));
 }
 function parseEnrolPacket(txt){
@@ -3232,6 +3244,255 @@ async function copyEnrolPacket(){
   try { if(navigator.clipboard && navigator.clipboard.writeText){ await navigator.clipboard.writeText(t); toast('Enrolment packet copied'); return; } } catch(e){}
   const box = document.getElementById('enrolPacketText');
   if(box){ box.select(); try { document.execCommand('copy'); toast('Enrolment packet copied'); } catch(e){ toast('Select the text and copy it manually'); } }
+}
+
+/* ---------- employee change packets: self-service edits travel to HR ---------- */
+const CHG_PREFIX = 'ERCHG1.';
+const CHG_LABEL = { phone:'Phone', email:'Email', address:'Address', marital:'Marital status', children:'Children', bank:'Bank', bankAcct:'Account number', ecName:'Emergency contact', ecPhone:'Emergency phone', ecRelation:'Relationship', pdpConsent:'PDPA consent' };
+let CHG_PENDING = null;
+const CHG_FILES = {};
+
+function chgVal(v){ if(v === true) return 'yes'; if(v === false) return 'no'; if(v === undefined || v === null || v === '') return '—'; return String(v); }
+function downloadText(name, text, mime){
+  const blob = new Blob([text], { type: mime || 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 400);
+}
+function pickSelfFields(emp){
+  const o = {};
+  EDITABLE_SELF.forEach(function(k){ o[k] = (emp && emp[k] !== undefined) ? emp[k] : ''; });
+  o.hbAcks = ((emp && emp.hbAcks) || []).length;
+  return o;
+}
+function selfPendingDiff(){
+  const emp = (state.employees || [])[0];
+  const b = SELF_STORE && SELF_STORE.blob;
+  if(!emp || !b) return [];
+  let base = {};
+  try { base = JSON.parse(b.snap || '{}'); } catch(e){ base = {}; }
+  const nowF = pickSelfFields(emp), rows = [];
+  Object.keys(nowF).forEach(function(k){
+    if(String(base[k] === undefined ? '' : base[k]) !== String(nowF[k])){
+      rows.push({ k:k, label: CHG_LABEL[k] || (k === 'hbAcks' ? 'Handbook acknowledgment' : k), from: chgVal(base[k]), to: chgVal(nowF[k]) });
+    }
+  });
+  return rows;
+}
+function diffTableHTML(rows, note){
+  const body = rows.map(function(r){
+    return '<tr><td><b>' + esc(r.label) + '</b></td><td class="mono dim">' + esc(r.from) + '</td><td class="mono"><b style="color:var(--green)">' + esc(r.to) + '</b></td></tr>';
+  }).join('');
+  return '<table class="reg"><thead><tr><th>Field</th><th>Before</th><th>After</th></tr></thead><tbody>' + body + '</tbody></table>' + (note ? '<p class="tiny dim" style="margin:8px 0 0">' + note + '</p>' : '');
+}
+async function buildChangePacket(){
+  if(!SELF_STORE || !SELF_STORE.blob) return null;
+  const b = SELF_STORE.blob;
+  const emp = (state.employees || [])[0] || {};
+  const pkt = {
+    v:1, kind:'change', ic:b.ic, name:b.name || emp.name, updatedAt: nowLocalISO(), dev: deviceTag(),
+    blob: { psalt:b.psalt, piv:b.piv, pct:b.pct, iter:b.iter || 250000, hiv:b.hiv, hct:b.hct, rec:b.rec, pinSet:!!b.pinSet }
+  };
+  return CHG_PREFIX + toB64(enc.encode(JSON.stringify(pkt)));
+}
+function parseChangePacket(txt){
+  let t = String(txt || '').replace(/\s+/g, '');
+  if(!t) return null;
+  if(t.indexOf(CHG_PREFIX) === 0) t = t.slice(CHG_PREFIX.length);
+  try {
+    const o = JSON.parse(dec.decode(fromB64(t)));
+    return (o && o.ic && o.blob && o.blob.rec && o.blob.hiv) ? o : null;
+  } catch(e){ return null; }
+}
+async function selfSendStart(){
+  const rows = selfPendingDiff();
+  if(!rows.length){ toast('No changes to send — edit your details first'); return; }
+  openModal('Step 1 of 2 · Review your changes',
+    '<p class="tiny dim" style="margin-top:0">Only the fields listed below leave this device. Salary, statutory numbers, documents and HR notes are never included.</p>' +
+    diffTableHTML(rows, 'Nothing has been sent yet. You will confirm once more before anything is written.'),
+    '<button class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="self-send-2">Confirm these changes</button>');
+}
+async function selfSendConfirm(){
+  const rows = selfPendingDiff();
+  if(!rows.length){ toast('No changes left to send'); return; }
+  let folder = '';
+  try { const h = await idbGet('self-out-handle'); if(h) folder = h.name || 'linked folder'; } catch(e){}
+  openModal('Step 2 of 2 · Send to HR',
+    '<p class="tiny dim" style="margin-top:0">The changes are sealed with your own password and can only be opened by the register. ' +
+    (folder ? 'They will be written into <b>' + esc(folder) + '</b> for HR to collect.' : 'They will download as a <span class="mono">.erchg</span> file for you to send to HR.') + '</p>' +
+    diffTableHTML(rows, '') +
+    '<div class="note" style="margin-top:10px">This is the last confirmation. After sending, HR still has to review and accept the change before it reaches the register.</div>',
+    '<button class="btn" data-action="self-send-1">Back</button><button class="btn" data-action="self-link-out">' + (folder ? 'Change folder' : 'Link a return folder') + '</button><button class="btn btn-primary" data-action="self-send-go">Send now</button>');
+}
+async function selfSendGo(){
+  const pkt = await buildChangePacket();
+  if(!pkt){ toast('Could not build the change packet'); return; }
+  const emp = (state.employees || [])[0] || {};
+  const baseName = 'chg-' + String(emp.name || 'employee').replace(/[^A-Za-z0-9]+/g, '-') + '-' + todayYMD() + '-' + String(Date.now()).slice(-5) + '.erchg';
+  let where = '';
+  try {
+    const h = await idbGet('self-out-handle');
+    if(h && h.getFileHandle){
+      let perm = 'granted';
+      try { perm = await h.queryPermission({ mode:'readwrite' }); } catch(e){ perm = 'granted'; }
+      if(perm !== 'granted') perm = await h.requestPermission({ mode:'readwrite' }).catch(function(){ return 'denied'; });
+      if(perm === 'granted'){
+        const fh = await h.getFileHandle(baseName, { create:true });
+        const w = await fh.createWritable();
+        await w.write(new Blob([pkt], { type:'text/plain' }));
+        await w.close();
+        where = 'written to ' + (h.name || 'your folder') + ' / ' + baseName;
+      }
+    }
+  } catch(e){ where = ''; }
+  if(!where){ downloadText(baseName, pkt); where = 'downloaded as ' + baseName; }
+  SELF_STORE.blob.sentAt = nowLocalISO();
+  SELF_STORE.blob.snap = JSON.stringify(pickSelfFields(emp));
+  selfStorePut(SELF_STORE.ic, SELF_STORE.blob);
+  logAction('Changes sent to HR', emp.name || '', 'Sealed packet ' + baseName, { who: emp.name || 'Employee' });
+  closeModal(); renderAll();
+  toast('Sent — ' + where);
+}
+async function linkReturnFolder(){
+  if(window.EDMBridge && window.EDMBridge.pickFolder){ toast('Use the folder picker that opened'); return; }
+  if(!window.showDirectoryPicker){ toast('This browser cannot write to a folder — send the .erchg file to HR instead'); return; }
+  try {
+    const h = await window.showDirectoryPicker({ id:'selfout', mode:'readwrite', startIn:'documents' });
+    const perm = await h.requestPermission({ mode:'readwrite' }).catch(function(){ return 'prompt'; });
+    if(perm !== 'granted'){ toast('Write permission is needed for that folder'); return; }
+    await idbSet('self-out-handle', h);
+    toast('Return folder linked: ' + h.name);
+    renderAll();
+  } catch(e){ if(e && e.name === 'AbortError') return; toast('Could not link the folder: ' + (e && e.message)); }
+}
+function selfSyncBar(){
+  const self = ROLE === 'self';
+  let bar = document.getElementById('selfBar');
+  if(!self){ if(bar) bar.remove(); return; }
+  if(!bar){
+    bar = document.createElement('div');
+    bar.id = 'selfBar';
+    bar.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:80;display:flex;gap:8px;align-items:center;background:var(--card);border:1px solid var(--line-strong);border-radius:3px;padding:7px 9px;box-shadow:0 18px 40px -24px rgba(11,36,64,.6)';
+    bar.innerHTML = '<button class="btn btn-sm" data-action="self-link-out" title="Folder HR shares with you — changes are written there">Folder</button><button class="btn btn-sm btn-primary" data-action="self-send" id="selfSendBtn">Send to HR</button>';
+    document.body.appendChild(bar);
+  }
+  const btn = document.getElementById('selfSendBtn');
+  if(btn){
+    const n = selfPendingDiff().length;
+    btn.textContent = n ? 'Send to HR (' + n + ')' : 'Send to HR';
+    btn.disabled = !n;
+    btn.title = n ? 'Review and send ' + n + ' changed field(s)' : 'No unsent changes';
+  }
+}
+async function scanChangeFiles(){
+  const out = [];
+  if(!EDM.handle || !EDM.handle.entries) return out;
+  try {
+    for await (const entry of EDM.handle.entries()){
+      const name = entry[0], h = entry[1];
+      if(!/\.erchg$/i.test(name)) continue;
+      try { const f = await h.getFile(); const t = await f.text(); out.push({ name:name, text:t }); } catch(e){}
+    }
+  } catch(e){}
+  return out;
+}
+async function chgScan(){
+  if(!EDM.handle){ toast('Link the EDM folder first (Settings)'); return; }
+  const list = await scanChangeFiles();
+  const host = document.getElementById('chgList');
+  if(!host) return;
+  if(!list.length){ host.innerHTML = '<p class="tiny dim" style="margin:0">No change packets found in the folder. Employees must send one from their own device.</p>'; toast('No packets in the folder'); return; }
+  host.innerHTML = '<table class="reg"><thead><tr><th>Packet</th><th class="r">Action</th></tr></thead><tbody>' + list.map(function(f, i){
+    CHG_FILES[f.name] = f.text;
+    return '<tr><td class="mono">' + esc(f.name) + '</td><td class="r"><button class="btn btn-sm btn-primary" data-action="chg-review" data-name="' + esc(f.name) + '">Review</button></td></tr>';
+  }).join('') + '</tbody></table>';
+  toast(list.length + ' packet(s) found');
+}
+function pickChgFile(inp){
+  const f = inp.files && inp.files[0]; if(!f) return;
+  const r = new FileReader();
+  r.onload = function(){ chgReview(String(r.result || ''), f.name); };
+  r.readAsText(f);
+}
+async function chgReview(text, fname){
+  const pkt = parseChangePacket(text);
+  if(!pkt){ toast('That is not a valid change packet'); return; }
+  if(!MK){ toast('Unlock the register with the HR password first'); return; }
+  const e = state.employees.find(function(x){ return normIc(x.ic) === normIc(pkt.ic); });
+  if(!e){ toast('No employee matches ' + pkt.ic); return; }
+  let rk, rec;
+  try {
+    rk = await unwrapRaw(MK, { iv: pkt.blob.hiv, ct: pkt.blob.hct });
+    rec = await openWith(rk, pkt.blob.rec);
+  } catch(err){ toast('The packet cannot be opened with this register key'); return; }
+  if(!rec || !rec.emp){ toast('The packet carries no record'); return; }
+  const rows = [];
+  EDITABLE_SELF.forEach(function(k){
+    if(String(e[k] === undefined ? '' : e[k]) !== String(rec.emp[k] === undefined ? '' : rec.emp[k])){
+      rows.push({ k:k, label: CHG_LABEL[k] || k, from: chgVal(e[k]), to: chgVal(rec.emp[k]) });
+    }
+  });
+  const fresh = ((rec.emp.hbAcks) || []).filter(function(a){ return !((e.hbAcks) || []).some(function(b){ return b.version === a.version && b.ackAt === a.ackAt; }); });
+  if(fresh.length) rows.push({ label:'Handbook acknowledgment', from: chgVal(((e.hbAcks) || []).length), to: chgVal(((e.hbAcks) || []).length + fresh.length) });
+  if(!rows.length){ toast('That packet carries no changes to this record'); return; }
+  CHG_PENDING = { pkt:pkt, rec:rec, e:e, name:fname, fname:fname, rows:rows };
+  openModal('Step 1 of 2 · Review ' + e.name + "'s changes",
+    '<p class="tiny dim" style="margin-top:0">Sealed by the employee on their own device and opened here with the register key. Source: <span class="mono">' + esc(fname) + '</span> · sent ' + esc(fmtDateTime(pkt.updatedAt || '')) + '</p>' +
+    diffTableHTML(rows, 'Nothing has been written to the register yet.') ,
+    '<button class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="chg-apply-1">Confirm these changes</button>');
+}
+function chgApplyConfirm(){
+  const s = CHG_PENDING; if(!s){ toast('Nothing to apply'); return; }
+  openModal('Step 2 of 2 · Write to the register',
+    '<p class="tiny dim" style="margin-top:0">' + esc(s.e.name) + ' — ' + s.rows.length + ' field(s) will replace the values held in the register, the change is recorded in the activity log, and the register is re-sealed' + (EDM.handle && ROLE !== 'self' ? ' and written to the EDM folder' : '') + '.</p>' +
+    diffTableHTML(s.rows, 'This is the last confirmation.') ,
+    '<button class="btn" data-action="chg-apply-1">Back</button><button class="btn btn-primary" data-action="chg-apply-2">Apply and sync</button>');
+}
+async function chgApplyGo(){
+  const s = CHG_PENDING; if(!s){ toast('Nothing to apply'); return; }
+  const e = s.e, rec = s.rec;
+  let n = 0;
+  EDITABLE_SELF.forEach(function(k){
+    if(rec.emp[k] !== undefined && String(e[k]) !== String(rec.emp[k])){ e[k] = rec.emp[k]; n++; }
+  });
+  let ackAdd = 0;
+  ((rec.emp.hbAcks) || []).forEach(function(a){
+    if(!((e.hbAcks) || []).some(function(b){ return b.version === a.version && b.ackAt === a.ackAt; })){
+      e.hbAcks = e.hbAcks || []; e.hbAcks.push(a); ackAdd++;
+    }
+  });
+  e.selfUpdatedAt = rec.updatedAt || nowLocalISO();
+  e.selfSeenAt = e.selfUpdatedAt; e.selfReview = true;
+  try {
+    const blob = selfStoreGet(e.ic);
+    if(blob){
+      blob.rec = s.pkt.blob.rec; blob.updatedAt = e.selfUpdatedAt;
+      if(s.pkt.blob.hiv) blob.hiv = s.pkt.blob.hiv;
+      if(s.pkt.blob.hct) blob.hct = s.pkt.blob.hct;
+      if(s.pkt.blob.psalt) blob.psalt = s.pkt.blob.psalt;
+      if(s.pkt.blob.piv){ blob.piv = s.pkt.blob.piv; blob.pct = s.pkt.blob.pct; }
+      blob.pinSet = !!s.pkt.blob.pinSet;
+      selfStorePut(e.ic, blob);
+    }
+  } catch(err){}
+  logAction('Employee changes applied', e.name, n + ' field(s)' + (ackAdd ? ' · ' + ackAdd + ' acknowledgment(s)' : '') + ' · ' + (s.fname || 'packet'), { who: (state.company && state.company.hrAdmin) || 'HR' });
+  await persist();
+  await edmPush();
+  if(s.fname && EDM.handle && EDM.handle.removeEntry && /\.erchg$/i.test(s.fname)){
+    try { await EDM.handle.removeEntry(s.fname); } catch(err){}
+  }
+  closeModal(); CHG_PENDING = null; renderAll();
+  toast('Applied ' + n + ' change(s)' + (EDM.status === 'linked' ? ' — EDM file updated' : ''));
+}
+function hrInboxMount(){
+  const host = document.getElementById('view-registers');
+  if(!host || ROLE === 'self' || document.getElementById('chgInbox')) return;
+  const panel = document.createElement('div');
+  panel.id = 'chgInbox'; panel.className = 'panel'; panel.style.marginTop = '14px';
+  panel.innerHTML = '<div class="panel-h"><h2>Employee changes <span class="tag">sealed packets</span></h2><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input type="file" id="chgFile" accept=".erchg,text/plain" class="hide" onchange="pickChgFile(this)"><button class="btn btn-sm" data-action="chg-pick">Open packet file</button><button class="btn btn-sm btn-primary" data-action="chg-scan">Scan EDM folder</button></div></div>' +
+    '<div class="panel-b" id="chgList"><p class="tiny dim" style="margin:0">Edits employees make on their own laptop or phone arrive as sealed packets. Scan the EDM folder, or open a packet the employee sent you. Nothing changes in the register until you confirm twice.</p></div>';
+  host.appendChild(panel);
 }
 
 async function issueEnrolment(id){
@@ -3915,7 +4176,9 @@ async function idbSet(k,v){ try { const db = await idbOpen(); await new Promise(
 
 function edmPayload(){
   const raw = localStorage.getItem(SV); if(!raw) return null;
-  return { app:'EDM Employee Register', format:'edm1', by:edmLabel(), pack:PACK.version, company:(state.company && state.company.name) || '', savedAt:new Date().toISOString(), vault:JSON.parse(raw) };
+  const selfs = [];
+  try { for(let i=0;i<localStorage.length;i++){ const k = localStorage.key(i); if(k && k.indexOf(SELF_PREFIX) === 0){ try { const b = JSON.parse(localStorage.getItem(k)); if(b && b.ic) selfs.push(b); } catch(e){} } } } catch(e){}
+  return { app:'EDM Employee Register', format:'edm1', by:edmLabel(), pack:PACK.version, company:(state.company && state.company.name) || '', savedAt:new Date().toISOString(), selfs:selfs, vault:JSON.parse(raw) };
 }
 function parseEdm(text){
   let o; try { o = JSON.parse(text); } catch(e){ throw new Error('That file is not an EDM database.'); }
