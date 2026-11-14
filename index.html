@@ -2352,11 +2352,11 @@ function renderAllBase(){
   const v = UI.view;
   $$('.view').forEach(s => s.classList.toggle('is-active', s.id === 'view-' + v));
   if(ROLE==='self' && v==='payslips') UI.view='self-profile', v=UI.view;
-  if(v==='payslips'){ try{ renderPayslips(); }catch(e){ console.error(e); } paintEdm && paintEdm(); updateChrome && updateChrome(); return; }
   $$('#nav button').forEach(b => b.setAttribute('aria-current', String(b.dataset.view === v)));
   const t = TITLES[v] || TITLES.dashboard;
   $('#viewTitle').innerHTML = t[0]; $('#viewEyebrow').textContent = t[1];
   document.title = t[2] + ' · Employee register';
+  if(v==='payslips'){ try{ renderPayslips(); }catch(e){ console.error(e); } applyRoleChrome(); if(typeof paintEdm==='function') paintEdm(); updateChrome(); return; }
   if(ROLE === 'self'){ if(v === 'self-claims'){ renderMyClaims(); } else { renderSelfPage(v); if(v === 'self-profile') appendSelfConsent(); } } else { ({ dashboard:renderDashboard, employees:renderEmployees, handbook:renderHandbook, payroll:renderPayroll, compliance:renderCompliance, organisation:renderOrg, claims:renderClaims, registers:renderRegisters, activity:renderActivity, settings:renderSettings, 'self-claims':renderMyClaims })[v](); }
   applyRoleChrome();
   if(typeof paintEdm === 'function') paintEdm();
