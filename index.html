@@ -3174,12 +3174,27 @@ function gateSubmit(){
   }
   if(err) err.textContent = 'That PIN or code does not match this record.';
 }
+async function createSelfStore(e, code){
+  if(!MK) return false;
+  const rk = await crypto.subtle.generateKey({ name:'AES-GCM', length:256 }, true, ['encrypt','decrypt']);
+  const rec = { emp: e, company: state.company, hb: state.settings.hb, log: (state.log || []).slice(0,40), updatedAt: nowLocalISO() };
+  const sealed = await sealWith(rk, rec);
+  const salt = toB64(rnd(16));
+  const kek = await kekOf(selfSecret(e.ic, code), salt, 250000);
+  const raw = await crypto.subtle.exportKey('raw', rk);
+  const w = await wrapRaw(kek, raw);
+  const blob = { ic: e.ic, name: e.name, psalt: salt, piv: w.iv, pct: w.ct, iter: 250000, pinSet: false, rec: sealed, updatedAt: rec.updatedAt, issuedAt: nowLocalISO() };
+  return selfStorePut(e.ic, blob);
+}
+
 async function issueEnrolment(id){
   const e = state.employees.find(x => x.id === id); if(!e) return;
   const a = accessOf(e);
   const code = String(Math.floor(100000 + Math.random()*900000));
   a.tempSalt = newSalt(); a.tempHash = pinHash(a.tempSalt, code); a.tempIssued = nowLocalISO();
   a.enabled = false; a.hash = ''; a.salt = '';
+  let seeded = false;
+  try { seeded = await createSelfStore(e, code); } catch(err){ seeded = false; console.error('self store', err); }
   logAction('Self-service code issued', e.name, 'One-time enrolment code');
   markDirty(); renderAll();
   openModal('Enrolment code for ' + e.name, `
@@ -3188,7 +3203,8 @@ async function issueEnrolment(id){
       <div class="ref">ONE-TIME CODE</div>
       <div class="mono" style="font-size:26px;letter-spacing:.16em;font-weight:600;color:var(--green)">${code}</div>
     </div>
-    <div class="note">Shown once. Issuing a new code cancels this one and the employee's existing PIN.</div>`,
+    <div class="note">Shown once. Issuing a new code cancels this one and the employee's existing PIN.</div>
+    ${seeded ? '' : '<div class="alert crit" style="margin-top:8px"><div class="code">STORE</div><div><b>Record not seeded</b><p>The employee link could not be written to this browser. Free some storage space or allow site data, then issue a new code.</p></div></div>'}`,
     '<button class="btn" data-action="close-modal">Done</button>');
 }
 
