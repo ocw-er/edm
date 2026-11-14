@@ -1045,6 +1045,42 @@ function upcomingItems(){
 }
 
 /* ---------- dashboard ---------- */
+function dashPayslipsHTML(){
+  const month = UI.month;
+  const list = state.employees.filter(isActive).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+  if(!list.length) return '';
+  let recorded = 0, net = 0, claims = 0;
+  const body = list.map(e => {
+    const p = payslipFor(e, month) || {};
+    const att = p.att || {};
+    const has = !!(num(att.days) || num(att.otHours) || num(att.unpaidLeaveDays) || num(att.lateH) || num(att.earlyH) || num(att.tofH));
+    if(has) recorded++;
+    net += num(p.net); claims += num(p.claimTotal);
+    const attTag = has ? '<span class="tag tag-live">' + (num(att.days) || 0) + ' days</span>' : '<span class="tag tag-warn">not recorded</span>';
+    return '<tr>' +
+      '<td><b>' + esc(e.name) + '</b><span class="dim tiny"> &middot; ' + esc(e.position || e.dept || '') + '</span></td>' +
+      '<td>' + attTag + '</td>' +
+      '<td class="r mono">' + money(p.gross) + '</td>' +
+      '<td class="r mono">' + money(p.claimTotal) + '</td>' +
+      '<td class="r mono"><b>' + money(p.net) + '</b></td>' +
+      '<td class="r" style="white-space:nowrap">' +
+        '<button class="btn btn-sm" data-action="ps-attendance" data-id="' + e.id + '" title="Record days worked, overtime, unpaid leave">Attendance</button> ' +
+        '<button class="btn btn-sm" data-action="ps-claim" data-id="' + e.id + '" title="Reimburse an expense in this month payslip">Claim</button> ' +
+        '<button class="btn btn-sm btn-primary" data-action="ps-print" data-id="' + e.id + '">Generate</button>' +
+      '</td></tr>';
+  }).join('');
+  const pending = list.length - recorded;
+  return '<div class="panel" style="margin-top:14px"><div class="panel-h"><h2>Payslips <span class="tag">' + monthLabel(month) + '</span></h2>' +
+    '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
+    '<span class="ref">EA 1955 s.24</span>' +
+    '<button class="btn btn-sm" data-action="ps-email-all" title="One email draft per employee">Email all</button>' +
+    '<button class="btn btn-sm" data-action="print-remit">Remittance</button>' +
+    '<button class="btn btn-sm" data-action="goto-payslips">Open payslips &rarr;</button>' +
+    '<button class="btn btn-sm btn-primary" data-action="ps-print-all">Generate all (' + list.length + ')</button></div></div>' +
+    '<div class="panel-b flush"><table class="reg"><thead><tr><th>Employee</th><th>Attendance</th><th class="r">Gross</th><th class="r">Claims</th><th class="r">Net pay</th><th class="r">Payslip</th></tr></thead><tbody>' + body + '</tbody>' +
+    '<tfoot><tr><td><b>' + list.length + ' active</b></td><td>' + (pending ? '<span class="tag tag-warn">' + pending + ' awaiting attendance</span>' : '<span class="tag tag-live">all recorded</span>') + '</td><td class="r mono">' + money(list.reduce((s,e)=>s+num((payslipFor(e,month)||{}).gross),0)) + '</td><td class="r mono">' + money(claims) + '</td><td class="r mono"><b>' + money(net) + '</b></td><td></td></tr></tfoot></table></div></div>';
+}
+
 function renderDashboard(){
   const act = state.employees.filter(isActive);
   if(!state.employees.length){
@@ -1122,6 +1158,7 @@ function renderDashboard(){
     <div class="panel"><div class="panel-h"><h2>Employer statutory cost</h2><span class="ref">${monthLabel(month)}</span></div><div class="panel-b">${stack}<hr class="rule"><div class="split-line tiny dim" style="justify-content:space-between"><span>Cost per RM1 of gross</span><b class="mono" style="color:var(--navy)">RM ${money(erTotal/gross)}</b></div></div></div>
     <div class="panel"><div class="panel-h"><h2>Upcoming</h2><button class="btn btn-sm btn-ghost" data-action="goto-registers">Calendar →</button></div><div class="panel-b">${upHTML}<hr class="rule"><div class="dl"><div class="d">15 ${fmtDate(nextDueDate()).slice(3,6)}</div><div class="t">Next remittance<small>EPF · SOCSO · EIS · PCB</small></div><span class="tag tag-live">due</span></div></div></div>
   </div>
+  ${dashPayslipsHTML()}
   <div class="sec-title"><h2>Recent activity</h2><p>Audit trail · who changed what, and when</p></div>
   <div class="panel"><div class="panel-b"><div class="timeline">${state.log.slice(0,5).map(l=>'<div class="tl-item"><b>'+esc(l.action)+'</b> — '+esc(l.detail||l.target)+' · '+esc(l.who||'')+'<br><time>'+esc(new Date(l.ts).toLocaleString('en-GB',{day:'2-digit',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'}))+'</time></div>').join('')||'<div class="tiny dim">No activity yet.</div>'}</div></div></div>`;
 }
@@ -1796,11 +1833,13 @@ function attendanceModal(empId){
 }
 function saveAttendance(empId){
   const e = state.employees.find(x => x.id === empId); if(!e) return;
+  const gv = function(s){ const el = document.getElementById(s); return el ? String(el.value == null ? '' : el.value) : ''; };
   const a = blankAttendance();
-  a.days = num($('#attDays').value); a.otHours = num($('#attOt').value); a.otAmount = num($('#attOtAmt').value); a.lateH = num($('#attLate').value); a.earlyH = num($('#attEarly').value); a.tofH = num($('#attTof').value);
-  a.unpaidLeaveDays = num($('#attUnpaid').value); a.remarks = $('#attRem').value.trim();
+  a.days = num(gv('attDays')); a.otHours = num(gv('attOt')); a.otAmount = num(gv('attOtAmt'));
+  a.lateH = num(gv('attLate')); a.earlyH = num(gv('attEarly')); a.tofH = num(gv('attTof'));
+  a.unpaidLeaveDays = num(gv('attUnpaid')); a.remarks = gv('attRem').trim();
   setAttendance(empId, UI.month, a);
-  logAction('Attendance recorded', e.name, monthLabel(UI.month) + ' · OT ' + a.otHours + 'h · unpaid leave ' + a.unpaidLeaveDays + 'd');
+  logAction('Attendance recorded', e.name, monthLabel(UI.month) + ' - OT ' + a.otHours + 'h - unpaid leave ' + a.unpaidLeaveDays + 'd');
   closeModal(); renderAll(); toast('Attendance saved');
 }
 function claimModal(empId){
@@ -1921,6 +1960,32 @@ function emailPayslipAll(){
   const missing = emps.filter(function(e){ return !(String(e.email||'').trim() || String(e.emailPrivate||'').trim()); }).length;
   emps.forEach(function(e, i){ setTimeout(function(){ emailPayslip(e); }, i*600); });
   toast('Opening ' + emps.length + ' email draft(s) — allow pop-ups if asked' + (missing ? ' · ' + missing + ' employee(s) have no email on record' : ''));
+}
+function printRemittanceSummary(){
+  const month = UI.month;
+  const act = state.employees.filter(isActive);
+  if(!act.length){ toast('No active employees'); return; }
+  const rows = act.map(e => ({ e: e, s: statutoryFor(e, month) }));
+  const sum = k => rows.reduce((a,r) => a + num(r.s[k]), 0);
+  const line = (label, er, ee, note) => '<tr><td>' + label + '</td><td class="r">' + money(er) + '</td><td class="r">' + money(ee) + '</td><td class="r"><b>' + money(er + ee) + '</b></td><td class="dim">' + note + '</td></tr>';
+  const body = rows.map(r => '<tr><td>' + esc(r.e.name) + '</td><td class="mono">' + esc(r.e.epfNo || '&mdash;') + '</td><td class="mono">' + esc(r.e.socsoNo || '&mdash;') + '</td><td class="r">' + money(r.s.gross) + '</td><td class="r">' + money(r.s.epfEr) + '</td><td class="r">' + money(r.s.epfEe) + '</td><td class="r">' + money(r.s.socEr) + '</td><td class="r">' + money(r.s.socEe) + '</td><td class="r">' + money(r.s.eisEr) + '</td><td class="r">' + money(r.s.eisEe) + '</td><td class="r">' + money(r.s.sk) + '</td><td class="r">' + money(r.s.pcb) + '</td></tr>').join('');
+  const html = '<!doctype html><html><head><meta charset="utf-8"><title>Remittance summary &mdash; ' + monthLabel(month) + '</title>' +
+    '<style>body{font-family:Helvetica,Arial,sans-serif;font-size:9px;color:#111;margin:22px}h1{font-size:16px;margin:0 0 2px}h2{font-size:10px;font-weight:400;color:#555;margin:0 0 14px}table{border-collapse:collapse;width:100%;margin-bottom:14px}th,td{border-bottom:.5px solid #ccc;padding:3px 4px;text-align:left}th{background:#eee;font-size:8px;text-transform:uppercase;letter-spacing:.04em}.r{text-align:right}.mono{font-family:Courier,monospace}.dim{color:#666}tfoot td{font-weight:bold;border-top:1px solid #333}h3{font-size:10px;margin:14px 0 4px}@media print{body{margin:10mm}}</style></head><body>' +
+    '<h1>Statutory remittance summary</h1><h2>' + esc((state.company && state.company.name) || 'Company') + ' &middot; ' + monthLabel(month) + ' &middot; ' + rows.length + ' employee(s)</h2>' +
+    '<h3>By fund</h3><table><thead><tr><th>Fund</th><th class="r">Employer</th><th class="r">Employee</th><th class="r">Total</th><th>Channel</th></tr></thead><tbody>' +
+    line('EPF', sum('epfEr'), sum('epfEe'), 'i-Akaun &middot; by 15th') +
+    line('SOCSO', sum('socEr'), sum('socEe'), 'ASSIST &middot; by 15th') +
+    line('EIS', sum('eisEr'), sum('eisEe'), 'ASSIST &middot; by 15th') +
+    line('SKBBK (perkeso)', sum('sk'), 0, 'Skim Keselamatan Sosial Bencana Kerja') +
+    line('PCB / MTD', 0, sum('pcb'), 'e-CP39 &middot; by 15th') +
+    '</tbody><tfoot><tr><td>Grand total</td><td class="r">' + money(sum('epfEr') + sum('socEr') + sum('eisEr') + sum('sk')) + '</td><td class="r">' + money(sum('epfEe') + sum('socEe') + sum('eisEe') + sum('pcb')) + '</td><td class="r">' + money(sum('epfEr') + sum('epfEe') + sum('socEr') + sum('socEe') + sum('eisEr') + sum('eisEe') + sum('sk') + sum('pcb')) + '</td><td></td></tr></tfoot></table>' +
+    '<h3>Per employee</h3><table><thead><tr><th>Employee</th><th>EPF no.</th><th>SOCSO no.</th><th class="r">Gross</th><th class="r">EPF er</th><th class="r">EPF ee</th><th class="r">SOC er</th><th class="r">SOC ee</th><th class="r">EIS er</th><th class="r">EIS ee</th><th class="r">SKBBK</th><th class="r">PCB</th></tr></thead><tbody>' + body + '</tbody></table>' +
+    '<p class="dim">Computed from the register under the MY-2026.2 statutory pack. Check against the fund portals before submitting &mdash; PCB in particular depends on cumulative TP1 reliefs held by payroll.</p>' +
+    '<script>window.onload=function(){window.print()}<\/script></body></html>';
+  const win = window.open('', '_blank');
+  if(!win){ toast('Allow pop-ups to print the remittance summary'); return; }
+  win.document.open(); win.document.write(html); win.document.close(); win.focus();
+  logAction('Remittance summary printed', 'All employees', monthLabel(month) + ' &middot; ' + rows.length + ' employee(s)');
 }
 function printPayslipBatch(emps){
   const month = UI.month;
@@ -2454,6 +2519,19 @@ document.addEventListener('click', ev => {
     case 'goto-compliance': go('compliance'); break;
     case 'goto-registers': go('registers'); break;
     case 'goto-settings': closeModal(); go('settings'); break;
+    case 'goto-payslips': go('payslips'); break;
+    case 'ps-attendance': attendanceModal(id); break;
+    case 'ps-attendance-save': saveAttendance(id); break;
+    case 'ps-claim': claimModal(id); break;
+    case 'ps-claim-save': saveClaim(id); break;
+    case 'ps-claim-approve': approveClaim(id, el.dataset.cid); break;
+    case 'ps-allow': allowModal(id); break;
+    case 'ps-allow-save': saveAllow(id); break;
+    case 'ps-print': printPayslip(id); break;
+    case 'ps-print-all': printPayslipBatch(state.employees.filter(isActive)); break;
+    case 'ps-email': { const e1 = state.employees.find(x=>x.id===id); if(e1) emailPayslip(e1); break; }
+    case 'ps-email-all': emailPayslipAll(); break;
+    case 'print-remit': printRemittanceSummary(); break;
     case 'goto-handbook': closeModal(); go('handbook'); break;
     case 'export-excel': exportWorkbook(); break;
     case 'export-json': exportJson(); break;
