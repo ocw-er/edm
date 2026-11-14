@@ -2521,6 +2521,8 @@ document.addEventListener('click', ev => {
     case 'goto-registers': go('registers'); break;
     case 'goto-settings': closeModal(); go('settings'); break;
     case 'goto-payslips': go('payslips'); break;
+    case 'enrol-copy': copyEnrolPacket(); break;
+    case 'enrol-download': downloadEnrolPacket(); break;
     case 'ps-attendance': attendanceModal(id); break;
     case 'ps-attendance-save': saveAttendance(id); break;
     case 'ps-claim': claimModal(id); break;
@@ -3177,7 +3179,7 @@ function gateSubmit(){
 async function createSelfStore(e, code){
   if(!MK) return false;
   const rk = await crypto.subtle.generateKey({ name:'AES-GCM', length:256 }, true, ['encrypt','decrypt']);
-  const rec = { emp: e, company: state.company, hb: state.settings.hb, log: (state.log || []).slice(0,40), updatedAt: nowLocalISO() };
+  const rec = { emp: e, company: state.company, hb: state.settings.hb, log: [], updatedAt: nowLocalISO() };
   const sealed = await sealWith(rk, rec);
   const salt = toB64(rnd(16));
   const kek = await kekOf(selfSecret(e.ic, code), salt, 250000);
@@ -3185,6 +3187,51 @@ async function createSelfStore(e, code){
   const w = await wrapRaw(kek, raw);
   const blob = { ic: e.ic, name: e.name, psalt: salt, piv: w.iv, pct: w.ct, iter: 250000, pinSet: false, rec: sealed, updatedAt: rec.updatedAt, issuedAt: nowLocalISO() };
   return selfStorePut(e.ic, blob);
+}
+
+let ENROL_PACKET = '', ENROL_NAME = '';
+function enrolPacketOf(blob){
+  const slim = { v:1, ic:blob.ic, name:blob.name, psalt:blob.psalt, piv:blob.piv, pct:blob.pct, iter:blob.iter || 250000, rec:blob.rec, issuedAt:blob.issuedAt || nowLocalISO() };
+  return 'EREN1.' + toB64(enc.encode(JSON.stringify(slim)));
+}
+function parseEnrolPacket(txt){
+  let t = String(txt || '').replace(/\s+/g, '');
+  if(!t) return null;
+  if(t.indexOf('EREN1.') === 0) t = t.slice(6);
+  try {
+    const o = JSON.parse(dec.decode(fromB64(t)));
+    return (o && o.ic && o.psalt && o.piv && o.pct && o.rec) ? o : null;
+  } catch(e){ return null; }
+}
+function pickEnrolFile(inp){
+  const f = inp.files && inp.files[0]; if(!f) return;
+  const r = new FileReader();
+  r.onload = function(){
+    const t = String(r.result || '').trim();
+    const o = parseEnrolPacket(t);
+    const box = document.getElementById('ePacket'); if(box) box.value = t;
+    const e = document.getElementById('eErr');
+    if(e) e.textContent = o ? '' : 'That file is not a valid enrolment packet.';
+  };
+  r.readAsText(f);
+}
+function downloadEnrolPacket(){
+  const t = ENROL_PACKET || (document.getElementById('enrolPacketText') || {}).value || '';
+  if(!t){ toast('No packet to download'); return; }
+  const blob = new Blob([t], { type:'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'enrol-' + String(ENROL_NAME || 'employee').replace(/[^A-Za-z0-9]+/g,'-') + '.erenrol';
+  document.body.appendChild(a); a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 400);
+  toast('Enrolment packet downloaded');
+}
+async function copyEnrolPacket(){
+  const t = ENROL_PACKET || (document.getElementById('enrolPacketText') || {}).value || '';
+  if(!t){ toast('No packet to copy'); return; }
+  try { if(navigator.clipboard && navigator.clipboard.writeText){ await navigator.clipboard.writeText(t); toast('Enrolment packet copied'); return; } } catch(e){}
+  const box = document.getElementById('enrolPacketText');
+  if(box){ box.select(); try { document.execCommand('copy'); toast('Enrolment packet copied'); } catch(e){ toast('Select the text and copy it manually'); } }
 }
 
 async function issueEnrolment(id){
@@ -3195,6 +3242,8 @@ async function issueEnrolment(id){
   a.enabled = false; a.hash = ''; a.salt = '';
   let seeded = false;
   try { seeded = await createSelfStore(e, code); } catch(err){ seeded = false; console.error('self store', err); }
+  ENROL_PACKET = seeded ? enrolPacketOf(selfStoreGet(e.ic) || {}) : '';
+  ENROL_NAME = e.name || '';
   logAction('Self-service code issued', e.name, 'One-time enrolment code');
   markDirty(); renderAll();
   openModal('Enrolment code for ' + e.name, `
@@ -3203,9 +3252,12 @@ async function issueEnrolment(id){
       <div class="ref">ONE-TIME CODE</div>
       <div class="mono" style="font-size:26px;letter-spacing:.16em;font-weight:600;color:var(--green)">${code}</div>
     </div>
+    <div class="field" style="margin-top:12px"><label>Enrolment packet — for the employee's own device</label><textarea id="enrolPacketText" class="mono" rows="4" readonly onclick="this.select()" style="font-size:10px"></textarea><span class="hint">Copy this and send it to the employee (WhatsApp, email, or the file below). They open the register on their own laptop or phone, choose the Employee door, paste the packet, then enter their IC, this code and a new password. The packet is sealed with the code — useless to anyone who does not have it.</span></div>
     <div class="note">Shown once. Issuing a new code cancels this one and the employee's existing PIN.</div>
     ${seeded ? '' : '<div class="alert crit" style="margin-top:8px"><div class="code">STORE</div><div><b>Record not seeded</b><p>The employee link could not be written to this browser. Free some storage space or allow site data, then issue a new code.</p></div></div>'}`,
-    '<button class="btn" data-action="close-modal">Done</button>');
+    '<button class="btn" data-action="enrol-copy">Copy packet</button><button class="btn" data-action="enrol-download">Download packet</button><button class="btn btn-primary" data-action="close-modal">Done</button>');
+  const pktBox = document.getElementById('enrolPacketText');
+  if(pktBox) pktBox.value = ENROL_PACKET || 'Packet unavailable — record could not be sealed in this browser.';
 }
 
 /* ================================================================
@@ -3381,6 +3433,8 @@ function buildDoors(){
         <div class="field"><label>Choose a password</label><input id="eNew1" type="password" class="mono" placeholder="8+ characters" autocomplete="new-password"></div>
         <div class="field"><label>Repeat password</label><input id="eNew2" type="password" class="mono" placeholder="8+ characters" autocomplete="new-password"></div>
       </div>
+      <div class="field"><label>Enrolment packet from HR</label><textarea id="ePacket" class="mono" rows="3" placeholder="Paste the EREN1... text HR sent you" spellcheck="false" style="font-size:10px"></textarea><span class="hint">Only needed when HR issued the code on a different computer. Leave blank if the code was issued on this browser.</span></div>
+      <div class="split-line"><input type="file" id="ePacketFile" accept=".erenrol,.txt,text/plain" class="hide" onchange="pickEnrolFile(this)"><button type="button" class="btn btn-sm" onclick="var el=document.getElementById('ePacketFile'); if(el) el.click();">Load packet file</button></div>
     </div>
     <div class="lock-err" id="eErr"></div>
     <button class="btn btn-primary" type="button" style="width:100%" onclick="empDoorGo()" id="eBtn">Open my record</button>
@@ -3567,8 +3621,11 @@ async function empDoorGo(){
   err.textContent = '';
   if(!ic){ err.textContent = 'Enter your IC or passport number.'; return; }
   if(!hasSubtle){ err.textContent = 'This browser cannot decrypt records. Open the file in Chrome, Edge or Firefox.'; return; }
-  const blob = selfStoreGet(ic);
-  if(!blob){ err.textContent = 'No record is linked to that number. Ask HR to issue you an enrolment code.'; return; }
+  let blob = selfStoreGet(ic);
+  const pk = ($('#ePacket') ? parseEnrolPacket($('#ePacket').value) : null);
+  if(pk && normIc(pk.ic) === ic) blob = pk;
+  else if(pk && normIc(pk.ic) !== ic){ err.textContent = 'That enrolment packet belongs to a different IC number.'; return; }
+  if(!blob){ err.textContent = 'No record on this device for that number. Paste the enrolment packet HR sent you, or ask HR to issue a new code.'; return; }
 
   if(door.first){
     const code = ($('#eCode').value || '').trim();
