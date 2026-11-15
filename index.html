@@ -2529,6 +2529,7 @@ document.addEventListener('click', ev => {
     case 'goto-settings': closeModal(); go('settings'); break;
     case 'goto-payslips': go('payslips'); break;
     case 'enrol-copy': copyEnrolPacket(); break;
+    case 'enrol-email': emailEnrolment(); break;
     case 'admin-send': adminSendStart(); break;
     case 'admin-send-1': adminSendStart(); break;
     case 'admin-send-2': adminSendConfirm(); break;
@@ -3801,6 +3802,65 @@ function adminRevoke(){
   persist().then(function(){ renderAll(); toast('Admin access revoked'); });
 }
 
+/* ---------- enrolment email ---------- */
+const ENROL_APP_URL = 'https://ocw-er.github.io/edm/';
+let ENROL_CTX = null;
+function enrolEmailTo(e){
+  const a = [];
+  [e.email, e.emailPrivate].forEach(function(x){ const s = String(x||'').trim(); if(s && s.indexOf('@') > 0 && a.indexOf(s) < 0) a.push(s); });
+  return a.join(',');
+}
+function enrolEmailBody(e, code){
+  const hr = (state.company && state.company.hrAdmin) || 'HR';
+  const co = (state.company && state.company.name) || 'Eternity Renewable';
+  return [
+    'Hello ' + (e.name || '') + ',',
+    '',
+    'Your access to the ' + co + ' Employee Register has been created.',
+    '',
+    '1. Open ' + ENROL_APP_URL,
+    '2. Choose the Employee door, then "First time? Use your enrolment code".',
+    '3. Paste the enrolment packet attached to this email (the EREN1... text, or the .erenrol file).',
+    '4. Enter your IC / passport number and the code below.',
+    '5. Choose your own password, 8 characters or more. Only you will know it.',
+    '',
+    'IC / passport on record: ' + (e.ic || ''),
+    'Enrolment code: ' + code,
+    '',
+    'The code works once. If it stops working, ask HR for a new one.',
+    'Do not forward this email — the packet inside it opens your own record.',
+    '',
+    'Regards,',
+    hr,
+    co
+  ].join('\n');
+}
+function openMail(to, subject, body){
+  const g = 'https://mail.google.com/mail/?view=cm&fs=1&tf=1&to=' + encodeURIComponent(to) + '&su=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+  const m = 'mailto:' + encodeURIComponent(to) + '?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(body);
+  if(g.length < 7000){
+    const w = window.open(g, '_blank');
+    if(w) return 'gmail';
+  }
+  const w2 = window.open(m, '_blank');
+  if(w2) return 'mailto';
+  window.location.href = m;
+  return 'mailto';
+}
+function emailEnrolment(){
+  const c = ENROL_CTX;
+  if(!c){ toast('Issue a code first'); return; }
+  const e = state.employees.find(function(x){ return x.id === c.id; });
+  if(!e){ toast('Record not found'); return; }
+  const to = enrolEmailTo(e);
+  if(!to){ toast('No email on record for ' + e.name + ' — add their email in the record first'); return; }
+  const subject = 'Employee Register access — your enrolment code';
+  const body = enrolEmailBody(e, c.code);
+  const how = openMail(to, subject, body);
+  logAction('Enrolment code emailed', e.name, to + ' · via ' + how);
+  toast(how === 'gmail' ? 'Gmail draft opened → ' + to + '. Attach the packet, then send.' : 'Mail draft opened → ' + to + '. Attach the packet, then send.');
+}
+
 async function issueEnrolment(id){
   const e = state.employees.find(x => x.id === id); if(!e) return;
   const a = accessOf(e);
@@ -3810,6 +3870,7 @@ async function issueEnrolment(id){
   let seeded = false;
   try { seeded = await createSelfStore(e, code); } catch(err){ seeded = false; console.error('self store', err); }
   ENROL_PACKET = seeded ? enrolPacketOf(selfStoreGet(e.ic) || {}) : '';
+  ENROL_CTX = { id:e.id, code:code, email:e.email || '' };
   ENROL_NAME = e.name || '';
   logAction('Self-service code issued', e.name, 'One-time enrolment code');
   markDirty(); renderAll();
@@ -3822,7 +3883,7 @@ async function issueEnrolment(id){
     <div class="field" style="margin-top:12px"><label>Enrolment packet — for the employee's own device</label><textarea id="enrolPacketText" class="mono" rows="4" readonly onclick="this.select()" style="font-size:10px"></textarea><span class="hint">Copy this and send it to the employee (WhatsApp, email, or the file below). They open the register on their own laptop or phone, choose the Employee door, paste the packet, then enter their IC, this code and a new password. The packet is sealed with the code — useless to anyone who does not have it.</span></div>
     <div class="note">Shown once. Issuing a new code cancels this one and the employee's existing PIN.</div>
     ${seeded ? '' : '<div class="alert crit" style="margin-top:8px"><div class="code">STORE</div><div><b>Record not seeded</b><p>The employee link could not be written to this browser. Free some storage space or allow site data, then issue a new code.</p></div></div>'}`,
-    '<button class="btn" data-action="enrol-copy">Copy packet</button><button class="btn" data-action="enrol-download">Download packet</button><button class="btn btn-primary" data-action="close-modal">Done</button>');
+    '<button class="btn" data-action="enrol-copy">Copy packet</button><button class="btn" data-action="enrol-download">Get packet file</button><button class="btn btn-primary" data-action="enrol-email">Email code to ' + (e.email ? esc(e.email) : 'employee') + '</button><button class="btn btn-ghost" data-action="close-modal">Done</button>');
   const pktBox = document.getElementById('enrolPacketText');
   if(pktBox) pktBox.value = ENROL_PACKET || 'Packet unavailable — record could not be sealed in this browser.';
 }
