@@ -1488,7 +1488,7 @@ function renderSettings(){
           </dl>
           ${EDM.status==='conflict' ? `<div class="note red" style="margin:0 0 10px">A conflict was detected at ${esc(v4Time({savedAt:EDM.conflict?EDM.conflict.at:''}))}. The folder copy was left untouched and your version is in <span class="mono">${esc(EDM.conflict?EDM.conflict.side:'')}</span>.</div>` : ''}
           <div class="split-line"><button class="btn btn-sm btn-primary" data-action="edm-link">${EDM.handle?'Change folder':'Link EDM folder'}</button><button class="btn btn-sm" data-action="edm-save">Save now</button><button class="btn btn-sm" data-action="edm-download">Download copy</button><button class="btn btn-sm" data-action="edm-open">Open from EDM</button>${EDM.status==='conflict'?'<button class="btn btn-sm" data-action="edm-reload">Load folder version</button><button class="btn btn-sm btn-danger" data-action="edm-keep">Overwrite with mine</button>':''}</div>
-          <p class="tiny dim" style="margin:8px 0 0">Link the synced <b>ER / EDM</b> folder once — for example <span class="mono">G:\Shared drives\ER\EDM</span>. Every save then rewrites <span class="mono">${EDM_FILE}</span> there as ciphertext that cannot be read without the HR password.</p>
+          <p class="tiny dim" style="margin:8px 0 0">Google Drive shared folder: install <b>Drive for Desktop</b> and wait for <b>Shared drives → ER → EDM</b> to sync locally, then link that local folder. Every write then reaches the shared drive through Drive. A phone or iPad cannot write to a folder — on those devices use the packet files instead. Link the synced <b>ER / EDM</b> folder once — for example <span class="mono">G:\Shared drives\ER\EDM</span>. Every save then rewrites <span class="mono">${EDM_FILE}</span> there as ciphertext that cannot be read without the HR password.</p>
         </div>
         <hr class="rule" style="margin:12px 0">
         <div style="display:flex;flex-direction:column;gap:7px">
@@ -2359,7 +2359,7 @@ function renderAllBase(){
   $('#viewTitle').innerHTML = t[0]; $('#viewEyebrow').textContent = t[1];
   document.title = t[2] + ' · Employee register';
   if(v==='payslips'){ try{ renderPayslips(); }catch(e){ console.error(e); } applyRoleChrome(); if(typeof paintEdm==='function') paintEdm(); updateChrome(); return; }
-  if(ROLE === 'self'){ if(v === 'self-claims'){ renderMyClaims(); } else { renderSelfPage(v); if(v === 'self-profile') appendSelfConsent(); } } else { ({ dashboard:renderDashboard, employees:renderEmployees, handbook:renderHandbook, payroll:renderPayroll, compliance:renderCompliance, organisation:renderOrg, claims:renderClaims, registers:function(){ renderRegisters(); if(typeof hrInboxMount === 'function') hrInboxMount(); if(typeof aqInboxMount === 'function') aqInboxMount(); },
+  if(ROLE === 'self'){ if(v === 'self-claims'){ renderMyClaims(); } else { renderSelfPage(v); if(v === 'self-profile') appendSelfConsent(); } } else { ({ dashboard:renderDashboard, employees:renderEmployees, handbook:renderHandbook, payroll:renderPayroll, compliance:renderCompliance, organisation:renderOrg, claims:renderClaims, registers:function(){ renderRegisters(); if(typeof hrInboxMount === 'function') hrInboxMount(); if(typeof aqInboxMount === 'function') aqInboxMount(); if(typeof selfStatusMount === 'function') selfStatusMount(); },
  activity:renderActivity, settings:function(){ renderSettings(); if(typeof settingsAdminMount === 'function') settingsAdminMount(); }, 'self-claims':renderMyClaims })[v](); }
   applyRoleChrome();
   if(typeof selfSyncBar === 'function') selfSyncBar();
@@ -2530,6 +2530,7 @@ document.addEventListener('click', ev => {
     case 'goto-payslips': go('payslips'); break;
     case 'enrol-copy': copyEnrolPacket(); break;
     case 'enrol-email': emailEnrolment(); break;
+    case 'send-update': sendUpdatedRecord(id); break;
     case 'admin-send': adminSendStart(); break;
     case 'admin-send-1': adminSendStart(); break;
     case 'admin-send-2': adminSendConfirm(); break;
@@ -3802,6 +3803,95 @@ function adminRevoke(){
   persist().then(function(){ renderAll(); toast('Admin access revoked'); });
 }
 
+/* ---------- employee links travelling with the EDM file ---------- */
+async function importSelfBlobs(list){
+  if(!Array.isArray(list) || !list.length) return 0;
+  let added = 0, updated = 0, kept = 0;
+  list.forEach(function(b){
+    if(!b || !b.ic || !b.rec) return;
+    const ic = normIc(b.ic); if(!ic) return;
+    const local = selfStoreGet(ic);
+    b.ic = ic;
+    if(!local){ selfStorePut(ic, b); added++; return; }
+    const a = String(local.updatedAt || ''), n = String(b.updatedAt || '');
+    if(n > a){ selfStorePut(ic, b); updated++; }
+    else kept++;
+  });
+  if(added || updated) logAction('Employee links imported', 'EDM folder', added + ' new - ' + updated + ' updated - ' + kept + ' already current');
+  return added + updated;
+}
+function updatePacketOf(e){
+  const blob = selfStoreGet(e.ic);
+  if(!blob || !blob.pinSet) return '';
+  const slim = { v:1, kind:'update', ic:blob.ic, name:blob.name, psalt:blob.psalt, piv:blob.piv, pct:blob.pct, iter:blob.iter || 250000, rec:blob.rec, hiv:blob.hiv, hct:blob.hct, pinSet:true, issuedAt:nowLocalISO() };
+  return 'EREN1.' + toB64(enc.encode(JSON.stringify(slim)));
+}
+function updateMailBody(e){
+  const hr = (state.company && state.company.hrAdmin) || 'HR';
+  return [
+    'Hello ' + (e.name || '') + ',',
+    '',
+    'Your record in the ' + ((state.company && state.company.name) || 'Eternity Renewable') + ' Employee Register has been updated by HR.',
+    '',
+    '1. Open ' + ENROL_APP_URL,
+    '2. Choose the Employee door. If it says "First time", click "I already have a PIN - sign in".',
+    '3. Paste the updated record packet attached to this email into the packet box.',
+    '4. Enter your IC / passport number and your own password.',
+    '',
+    'Your password has not changed. The packet only refreshes what HR holds for you.',
+    'Do not forward this email - the packet opens your own record.',
+    '',
+    'Regards,',
+    hr
+  ].join('\n');
+}
+function sendUpdatedRecord(id){
+  const e = state.employees.find(function(x){ return x.id === id; });
+  if(!e) return;
+  const blob = selfStoreGet(e.ic);
+  if(!blob){ toast('No employee link for ' + e.name + ' - issue an enrolment code first'); return; }
+  if(!blob.pinSet){ toast(e.name + ' has not set a password yet - send the enrolment code, not an update'); return; }
+  const txt = updatePacketOf(e);
+  if(!txt){ toast('Could not build the updated record'); return; }
+  const base = 'update-' + String(e.name || 'employee').replace(/[^A-Za-z0-9]+/g,'-') + '-' + todayYMD() + '.erenrol';
+  downloadText(base, txt);
+  const to = enrolEmailTo(e);
+  if(to){
+    openMail(to, 'Employee Register - your record has been updated', updateMailBody(e));
+    toast('Packet downloaded and mail draft opened - attach ' + base + ' before sending');
+  } else {
+    toast('Packet downloaded (' + base + ') - no email on record, send it another way');
+  }
+  logAction('Updated record sent', e.name, to || 'packet downloaded');
+}
+function selfStatusMount(){
+  const host = document.getElementById('view-registers');
+  if(!host || ROLE === 'self' || isAdmin() || document.getElementById('selfStatus')) return;
+  const act = state.employees.filter(isActive).sort(function(a,b){ return String(a.name).localeCompare(String(b.name)); });
+  const rows = act.map(function(e){
+    const b = selfStoreGet(e.ic);
+    let state_ = 'no link', tag = 'tag-neutral', canSend = false;
+    if(b){ canSend = !!b.pinSet;
+      if(!b.pinSet){ state_ = 'code issued'; tag = 'tag-warn'; }
+      else { state_ = 'active'; tag = 'tag-pass'; }
+    }
+    const sent = b && b.sentAt ? fmtDate(b.sentAt.slice(0,10)) : '-';
+    const login = b && b.lastLoginAt ? fmtDate(b.lastLoginAt.slice(0,10)) : '-';
+    const applied = e.selfSentAt || b && b.sentAt ? (e.selfSeenAt && b && b.sentAt && String(e.selfSeenAt) >= String(b.sentAt) ? 'applied' : 'pending') : '-';
+    return '<tr><td><b>' + esc(e.name) + '</b></td><td><span class="tag ' + tag + '">' + esc(state_) + '</span></td>' +
+      '<td class="mono">' + esc(login) + '</td><td class="mono">' + esc(sent) + '</td>' +
+      '<td>' + (applied === 'pending' ? '<span class="tag tag-warn">pending</span>' : applied === 'applied' ? '<span class="tag tag-pass">applied</span>' : '<span class="dim">-</span>') + '</td>' +
+      '<td class="r">' + (canSend ? '<button class="btn btn-sm" data-action="send-update" data-id="' + e.id + '" title="Send the refreshed record back to this employee">Updated record</button>' : '<span class="dim tiny">awaiting enrolment</span>') + '</td></tr>';
+  }).join('');
+  const linked = act.filter(function(e){ const b = selfStoreGet(e.ic); return b && b.pinSet; }).length;
+  const panel = document.createElement('div');
+  panel.id = 'selfStatus'; panel.className = 'panel'; panel.style.marginTop = '14px';
+  panel.innerHTML = '<div class="panel-h"><h2>Employee self-service <span class="tag">' + linked + ' of ' + act.length + ' active</span></h2><span class="ref">own record only</span></div>' +
+    '<div class="panel-b flush"><table class="reg"><thead><tr><th>Employee</th><th>Link</th><th>Last sign-in</th><th>Last packet</th><th>Status</th><th class="r">Return record</th></tr></thead><tbody>' + (rows || '<tr><td colspan="6" class="dim">No active employees.</td></tr>') + '</tbody></table></div>' +
+    '<div class="panel-b"><p class="tiny dim" style="margin:0">A packet stays <b>pending</b> until you open it and confirm twice. <b>Updated record</b> sends the corrected copy back, so the employee sees what the register now holds.</p></div>';
+  host.appendChild(panel);
+}
+
 /* ---------- enrolment email ---------- */
 const ENROL_APP_URL = 'https://ocw-er.github.io/edm/';
 let ENROL_CTX = null;
@@ -4558,16 +4648,18 @@ async function edmRestore(){
   if(!EDM.handle) return;
   if(window.EDMBridge && await window.EDMBridge.hasFolder()){
     EDM.name = window.EDMBridge.folderName(); EDM.status = 'linked';
-    try { const s = await window.EDMBridge.readFile(EDM_FILE); if(s){ const v = parseEdm(s); EDM.lastWrite = v.savedAt || ''; EDM.base = { sig:sigOf(v), savedAt:v.savedAt, by:v.by }; } } catch(e){}
+    try { const s = await window.EDMBridge.readFile(EDM_FILE); if(s){ const v = parseEdm(s); EDM.lastWrite = v.savedAt || ''; EDM.base = { sig:sigOf(v), savedAt:v.savedAt, by:v.by }; await importSelfBlobs(parseEdmSelfs(s)); } } catch(e){}
     paintEdm(); return;
   }
   EDM.name = EDM.handle.name || 'EDM'; EDM.status = 'linked';
   try {
     const fh = await EDM.handle.getFileHandle(EDM_FILE);
     const f = await fh.getFile();
-    const v = parseEdm(await f.text());
+    const raw = await f.text();
+    const v = parseEdm(raw);
     EDM.lastWrite = v.savedAt || '';
     EDM.base = { sig:sigOf(v), savedAt:v.savedAt, by:v.by };
+    await importSelfBlobs(parseEdmSelfs(raw));
   } catch(e){ EDM.lastWrite = ''; }
   paintEdm();
 }
@@ -4584,6 +4676,12 @@ async function linkEdm(){
     renderAll();
     toast('Linked to "' + h.name + '" — the encrypted database saves there from now on');
   } catch(e){ if(e && e.name === 'AbortError') return; toast('Could not link the folder: ' + (e && e.message)); }
+}
+function parseEdmSelfs(text){ try { const o = JSON.parse(text); return Array.isArray(o && o.selfs) ? o.selfs : []; } catch(e){ return []; } }
+async function edmReadRawSelfs(){
+  if(window.EDMBridge && await window.EDMBridge.hasFolder()){ const s = await window.EDMBridge.readFile(EDM_FILE); return s ? parseEdmSelfs(s) : []; }
+  if(!EDM.handle || !EDM.handle.getFileHandle) return [];
+  try { const fh = await EDM.handle.getFileHandle(EDM_FILE); const f = await fh.getFile(); return parseEdmSelfs(await f.text()); } catch(e){ return []; }
 }
 async function edmReadMain(){
   if(window.EDMBridge && await window.EDMBridge.hasFolder()){ const s = await window.EDMBridge.readFile(EDM_FILE); return s ? parseEdm(s) : null; }
@@ -4648,6 +4746,7 @@ async function edmReload(){
   try {
     const data = await openWith(MK, cur);
     hydrate(data); localStorage.setItem(SV, JSON.stringify(cur));
+    try { await importSelfBlobs((await edmReadRawSelfs())); } catch(e){}
     EDM.base = { sig:sigOf(cur), savedAt:cur.savedAt, by:cur.by };
     EDM.status = 'linked'; EDM.conflict = null; EDM.lastWrite = cur.savedAt || '';
     logAction('EDM version loaded', EDM_FILE, 'Folder copy replaced the in-app register');
