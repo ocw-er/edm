@@ -585,6 +585,7 @@ table.cl-lines-tbl{margin-top:10px;font-size:11.5px} table.cl-lines-tbl td{paddi
         <button class="btn" data-action="open-self" title="Hand the device to an employee — opens only their own record">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.4"/><path d="M5 20c0-3.8 3.1-6.4 7-6.4s7 2.6 7 6.4"/></svg>Employee access
         </button>
+        <button class="btn" data-action="sync-start" id="railSync" title="Write the encrypted register and every employee link to the ER shared folder">Sync to ER folder</button>
         <button class="btn" data-action="export-excel" title="Export the whole database to an Excel workbook">
           <svg viewBox="0 0 24 24"><path d="M12 3v11m0 0 4-4m-4 4-4-4M4 17v3h16v-3"/></svg>Excel
         </button>
@@ -2365,6 +2366,7 @@ function renderAllBase(){
   if(typeof selfSyncBar === 'function') selfSyncBar();
   if(typeof adminBar === 'function') adminBar();
   if(typeof adminRedactDash === 'function') adminRedactDash();
+  if(typeof syncBadge === 'function') syncBadge();
   if(typeof paintEdm === 'function') paintEdm();
   updateChrome();
 }
@@ -2528,6 +2530,9 @@ document.addEventListener('click', ev => {
     case 'goto-registers': go('registers'); break;
     case 'goto-settings': closeModal(); go('settings'); break;
     case 'goto-payslips': go('payslips'); break;
+    case 'sync-start': syncStart(); break;
+    case 'sync-go-1': syncConfirm(); break;
+    case 'sync-run': syncRun(); break;
     case 'enrol-copy': copyEnrolPacket(); break;
     case 'enrol-email': emailEnrolment(); break;
     case 'send-update': sendUpdatedRecord(id); break;
@@ -3801,6 +3806,112 @@ function adminRevoke(){
   if(state.adminKey) delete state.adminKey;
   logAction('HR Admin access revoked', 'Restricted door', 'Admin key removed from this device');
   persist().then(function(){ renderAll(); toast('Admin access revoked'); });
+}
+
+/* ---------- manual sync to the ER shared folder (EDM) ---------- */
+let SYNC_LOG = { at:'', bytes:0, ok:false, files:0 };
+async function edmFileBytes(){
+  try {
+    if(window.EDMBridge && await window.EDMBridge.hasFolder()){ const s = await window.EDMBridge.readFile(EDM_FILE); return s ? s.length : 0; }
+    if(!EDM.handle || !EDM.handle.getFileHandle) return 0;
+    const fh = await EDM.handle.getFileHandle(EDM_FILE);
+    const f = await fh.getFile();
+    return f.size || 0;
+  } catch(e){ return 0; }
+}
+function syncFacts(){
+  const act = state.employees.filter(isActive).length;
+  let links = 0, pending = 0;
+  state.employees.forEach(function(e){
+    const b = selfStoreGet(e.ic);
+    if(b && b.pinSet) links++;
+    if(b && b.sentAt && (!e.selfSeenAt || String(e.selfSeenAt) < String(b.sentAt))) pending++;
+  });
+  return { act:act, links:links, pending:pending, all:state.employees.length, name:EDM.name || '', status:EDM.status, last:EDM.lastWrite || '' };
+}
+async function syncStart(){
+  if(ROLE === 'self'){ toast('Saving your own record does not write to the shared folder'); return; }
+  const f = syncFacts();
+  if(!EDM.handle && !(window.EDMBridge && await window.EDMBridge.hasFolder())){
+    openModal('No shared folder linked',
+      '<p class="tiny dim" style="margin-top:0">The register is safe in this browser, but nothing is being written to the ER shared folder yet. Link the folder once and every sync will reach it.</p>' +
+      '<div class="note">On Windows: install <b>Drive for Desktop</b>, let <b>Shared drives → ER → EDM</b> appear in File Explorer, then link that local folder. A phone cannot write to a folder — use <b>Download copy</b> there and copy the file in.</div>',
+      '<button class="btn" data-action="close-modal">Later</button><button class="btn btn-primary" data-action="edm-link">Link ER shared folder</button>');
+    return;
+  }
+  const size = await edmFileBytes();
+  openModal('Step 1 of 2 - Review the sync',
+    '<p class="tiny dim" style="margin-top:0">This writes the encrypted register and every employee link to the ER shared folder. Nothing is written until you confirm on the next screen.</p>' +
+    '<dl class="kv">' +
+      '<dt>Folder</dt><dd>' + esc(f.name || 'linked folder') + '</dd>' +
+      '<dt>File</dt><dd class="mono">' + EDM_FILE + '</dd>' +
+      '<dt>Employees</dt><dd>' + f.act + ' active of ' + f.all + ' on register</dd>' +
+      '<dt>Employee links</dt><dd>' + f.links + ' sealed record(s) travel with the file</dd>' +
+      '<dt>Folder file now</dt><dd class="mono">' + (size ? (size/1024).toFixed(1) + ' KB' : 'not readable') + '</dd>' +
+      '<dt>Last write</dt><dd class="mono">' + (f.last ? fmtDate(f.last) + ' · ' + timeHM(f.last) : 'never from this device') + '</dd>' +
+      '<dt>Conflicts</dt><dd>' + (f.status === 'conflict' ? '<b style="color:var(--red)">unresolved - will not overwrite</b>' : 'none detected') + '</dd>' +
+    '</dl>' +
+    (f.pending ? '<div class="note" style="margin-top:10px">' + f.pending + ' employee change packet(s) are still waiting for your review. They are not included in this sync - apply them from Registers first if you want them in the register.</div>' : ''),
+    '<button class="btn" data-action="close-modal">Cancel</button><button class="btn btn-primary" data-action="sync-go-1">Confirm and continue</button>');
+}
+async function syncConfirm(){
+  const f = syncFacts();
+  openModal('Step 2 of 2 - Write to the ER shared folder',
+    '<p class="tiny dim" style="margin-top:0">Final confirmation. The file is replaced with the current register, sealed with the HR password. If the folder copy changed since this device last wrote it, the sync stops and your version is written to a conflict file instead of overwriting.</p>' +
+    '<div class="note"><b>' + esc(f.name || 'linked folder') + ' / ' + EDM_FILE + '</b><br>' + f.act + ' active employees · ' + f.links + ' employee link(s) · AES-256-GCM</div>',
+    '<button class="btn" data-action="sync-start">Back</button><button class="btn btn-primary" data-action="sync-run">Sync now</button>');
+}
+async function syncRun(){
+  closeModal();
+  const rs = $('#railEdm'); if(rs) rs.textContent = 'EDM - syncing...';
+  try {
+    await persist();
+    await pushAllSelf();
+    await edmPush();
+    let env = null;
+    try {
+      let raw = '';
+      if(EDM.handle && EDM.handle.getFileHandle){ const fh = await EDM.handle.getFileHandle(EDM_FILE); const f = await fh.getFile(); raw = await f.text(); }
+      else if(window.EDMBridge && await window.EDMBridge.hasFolder()){ raw = (await window.EDMBridge.readFile(EDM_FILE)) || ''; }
+      env = raw ? JSON.parse(raw) : null;
+    } catch(e){ env = null; }
+    const bytes = await edmFileBytes();
+    const verified = !!(env && env.vault && env.vault.v !== undefined && EDM.lastWrite && String(env.savedAt) === String(EDM.lastWrite));
+    SYNC_LOG = { at:nowLocalISO(), bytes:bytes, ok:EDM.status === 'linked' && verified, files:1 };
+    if(EDM.status === 'conflict'){
+      openModal('Sync stopped - the folder changed',
+        '<p class="tiny dim" style="margin-top:0">Another device wrote to <span class="mono">' + EDM_FILE + '</span> after this one last read it. Your version was saved to a conflict file so nothing was overwritten.</p>' +
+        '<div class="note">Load the folder version and retry, or overwrite it with yours if you are certain this device holds the correct register.</div>',
+        '<button class="btn" data-action="close-modal">Close</button><button class="btn" data-action="edm-reload">Load folder version</button><button class="btn btn-primary" data-action="edm-keep">Overwrite with mine</button>');
+      return;
+    }
+    if(EDM.status !== 'linked'){
+      toast('Sync failed - the folder could not be written. Check the link and permissions.');
+      renderAll(); return;
+    }
+    logAction('Synced to ER shared folder', EDM_FILE, (bytes/1024).toFixed(1) + ' KB · ' + state.employees.filter(isActive).length + ' active · verified ' + (verified ? 'yes' : 'unconfirmed'));
+    renderAll();
+    openModal('Synced to the ER shared folder',
+      '<p class="tiny dim" style="margin-top:0">The register in <b>' + esc(EDM.name || 'the linked folder') + '</b> now matches this device.</p>' +
+      '<dl class="kv">' +
+        '<dt>File</dt><dd class="mono">' + EDM_FILE + '</dd>' +
+        '<dt>Written</dt><dd class="mono">' + timeHM(SYNC_LOG.at) + ' · ' + fmtDate(SYNC_LOG.at.slice(0,10)) + '</dd>' +
+        '<dt>Size</dt><dd class="mono">' + (bytes/1024).toFixed(1) + ' KB</dd>' +
+        '<dt>Read back</dt><dd>' + (verified ? '<span class="tag tag-pass">verified</span> the file on disk carries this register' : '<span class="tag tag-warn">unconfirmed</span> the folder could not be read back - check Drive synced it') + '</dd>' +
+      '</dl>' +
+      '<div class="note" style="margin-top:10px">Google Drive uploads the file when the local folder syncs. If the Drive icon shows it still uploading, give it a moment before another machine opens it.</div>',
+      '<button class="btn btn-primary" data-action="close-modal">Done</button>');
+  } catch(e){
+    toast('Sync failed: ' + e.message);
+    renderAll();
+  }
+}
+function syncBadge(){
+  const el = document.getElementById('railSync');
+  if(!el) return;
+  const on = EDM.status === 'linked';
+  el.textContent = (SYNC_LOG.at && SYNC_LOG.ok) ? 'Synced ' + timeHM(SYNC_LOG.at) : (on ? 'Sync to ER folder' : 'Link folder');
+  el.style.borderColor = on ? 'var(--green)' : '';
 }
 
 /* ---------- employee links travelling with the EDM file ---------- */
