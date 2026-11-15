@@ -4418,10 +4418,10 @@ function enterApp(){
 
 async function lockNow(){
   if(ROLE === 'self'){ return exitSelfNow(); }
-  if(MK){
-    if(dirty) await persist();
-    logAction('Register locked', 'HR / Admin door', 'Locked by user or idle timer', { quiet:true });
-    await persist();
+  if(MK || AK){
+    const r = await autoSyncOnLogout('lock');
+    logAction('Register locked', isAdmin() ? 'HR Admin door' : 'HR Manager door', 'Locked by user or idle timer · ' + (r.ok ? 'synced' : 'not synced'), { quiet:true });
+    if(MK) await persist();
   }
   MK = null; PW = null; AK = null; HR_ROLE = 'manager'; ADMIN_BASE = null; RK_CACHE.clear();
   state = blankState();
@@ -4556,6 +4556,66 @@ async function saveSelfPw(){
 function selfAutoOn(){ try { const v = localStorage.getItem('self.auto'); return v === null ? true : v === '1'; } catch(e){ return true; } }
 function setSelfAuto(on){ try { localStorage.setItem('self.auto', on ? '1' : '0'); } catch(e){} renderAll(); }
 async function selfFolderHandle(){ try { return await idbGet('self-out-handle'); } catch(e){ return null; } }
+/* ---------- every sign-out writes to the ER shared folder ---------- */
+let LOGOUT_SYNC = { at:'', role:'', ok:false, bytes:0, packets:0 };
+async function adminAutoFlush(){
+  if(!AK || !state.adminKey) return { packets:0, where:'' };
+  const rows = adminPendingRows();
+  if(!rows.length) return { packets:0, where:'nothing to send' };
+  const sealed = await sealWith(AK, redactState(state));
+  const pkt = { v:1, kind:'adminq', by:(state.company && state.company.adminName) || 'HR Admin', at:nowLocalISO(), dev:deviceTag(), n:rows.length, key:state.adminKey, red:sealed };
+  const text = AQ_PREFIX + toB64(enc.encode(JSON.stringify(pkt)));
+  const base = 'admin-changes-' + todayYMD() + '-' + String(Date.now()).slice(-5) + '.eraq';
+  let where = '';
+  try {
+    const h = await selfFolderHandle();
+    if(h && h.getFileHandle){
+      let perm = 'granted';
+      try { perm = await h.queryPermission({ mode:'readwrite' }); } catch(e){ perm = 'granted'; }
+      if(perm !== 'granted') perm = await h.requestPermission({ mode:'readwrite' }).catch(function(){ return 'denied'; });
+      if(perm === 'granted'){
+        const fh = await h.getFileHandle(base, { create:true });
+        const w = await fh.createWritable(); await w.write(new Blob([text], { type:'text/plain' })); await w.close();
+        where = 'ER folder / ' + base;
+      }
+    }
+  } catch(e){ where = ''; }
+  if(!where){ try { downloadText(base, text); where = 'downloaded ' + base; } catch(e){ where = ''; } }
+  ADMIN_BASE = adminSnapshot();
+  logAction('Admin changes sent on sign-out', rows.length + ' field(s)', where);
+  return { packets: rows.length ? 1 : 0, where: where };
+}
+async function syncToFolderQuiet(){
+  await pushAllSelf();
+  await edmPush();
+  let bytes = 0;
+  try { bytes = await edmFileBytes(); } catch(e){ bytes = 0; }
+  return { ok: EDM.status === 'linked', bytes: bytes, where: EDM.name || '' };
+}
+async function autoSyncOnLogout(reason){
+  const out = { at:nowLocalISO(), role:HGO(), ok:false, bytes:0, packets:0, where:'' };
+  function HGO(){ return ROLE === 'self' ? 'employee' : (isAdmin() ? 'hr-admin' : 'hr-manager'); }
+  try {
+    if(ROLE === 'self'){
+      const r = await selfAutoFlush(reason || 'sign-out');
+      out.packets = r.n ? 1 : 0; out.where = r.where; out.ok = r.ok;
+    } else if(isAdmin()){
+      const a = await adminAutoFlush();
+      out.packets = a.packets; out.where = a.where;
+      await persistAdmin();
+      out.ok = true;
+    } else if(MK){
+      if(dirty) await persist();
+      const s = await syncToFolderQuiet();
+      out.ok = s.ok; out.bytes = s.bytes; out.where = s.where;
+      if(s.ok) logAction('Sign-out synced to ER folder', EDM_FILE, (s.bytes/1024).toFixed(1) + ' KB · ' + state.employees.filter(isActive).length + ' active');
+    }
+  } catch(e){ out.ok = false; out.err = e.message; }
+  LOGOUT_SYNC = out;
+  try { paintEdm(); } catch(e){}
+  return out;
+}
+
 async function selfAutoFlush(reason){
   if(!SELF_STORE || !SELF_STORE.blob || typeof selfPendingDiff !== 'function') return { ok:false, n:0, where:'' };
   const rows = selfPendingDiff();
@@ -4590,10 +4650,11 @@ async function selfAutoFlush(reason){
 }
 async function exitSelfNow(){
   const rows = (typeof selfPendingDiff === 'function') ? selfPendingDiff() : [];
-  if(!rows.length || !selfAutoOn()){ selfSignOut(false); return; }
-  const r = await selfAutoFlush('sign-out');
+  if(!selfAutoOn()){ selfSignOut(false); return; }
+  const before = rows.length;
+  const r = await autoSyncOnLogout('sign-out');
   selfSignOut(true);
-  toast(r.n ? (r.ok ? 'Sent ' + r.n + ' change(s) to ' + r.where + ' - signed out' : 'Could not send - signed out anyway') : 'Signed out');
+  toast(before ? (r.ok ? 'Sent ' + before + ' change(s) to ' + r.where + ' - signed out' : 'Could not send - signed out anyway') : 'Signed out');
 }
 
 function selfSignOut(silent){
