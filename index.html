@@ -2553,6 +2553,7 @@ document.addEventListener('click', ev => {
     case 'self-send-2': selfSendConfirm(); break;
     case 'self-send-go': selfSendGo(); break;
     case 'self-link-out': linkReturnFolder(); break;
+    case 'self-auto-toggle': setSelfAuto(el.checked); break;
     case 'chg-pick': { const f = document.getElementById('chgFile'); if(f) f.click(); break; }
     case 'chg-scan': chgScan(); break;
     case 'chg-review': chgReview(CHG_FILES[el.dataset.name] || '', el.dataset.name); break;
@@ -3401,7 +3402,7 @@ function selfSyncBar(){
     bar = document.createElement('div');
     bar.id = 'selfBar';
     bar.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:80;display:flex;gap:8px;align-items:center;background:var(--card);border:1px solid var(--line-strong);border-radius:3px;padding:7px 9px;box-shadow:0 18px 40px -24px rgba(11,36,64,.6)';
-    bar.innerHTML = '<button class="btn btn-sm" data-action="self-link-out" title="Folder HR shares with you — changes are written there">Folder</button><button class="btn btn-sm btn-primary" data-action="self-send" id="selfSendBtn">Send to HR</button>';
+    bar.innerHTML = '<label class="switch" style="text-transform:none;letter-spacing:0;font-size:11px" title="Send your changes automatically when you sign out"><input type="checkbox" data-action="self-auto-toggle" ' + (selfAutoOn() ? 'checked' : '') + '><span class="tr"></span>Auto-send</label><button class="btn btn-sm" data-action="self-link-out" title="Pick the ER shared folder so changes are written there for HR">ER folder</button><button class="btn btn-sm btn-primary" data-action="self-send" id="selfSendBtn">Send to HR</button>';
     document.body.appendChild(bar);
   }
   const btn = document.getElementById('selfSendBtn');
@@ -4416,7 +4417,7 @@ function enterApp(){
 }
 
 async function lockNow(){
-  if(ROLE === 'self'){ return selfSignOut(true); }
+  if(ROLE === 'self'){ return exitSelfNow(); }
   if(MK){
     if(dirty) await persist();
     logAction('Register locked', 'HR / Admin door', 'Locked by user or idle timer', { quiet:true });
@@ -4551,6 +4552,50 @@ async function saveSelfPw(){
   closeModal(); toast('Password updated');
 }
 
+/* ---------- automatic flush to the ER folder when the employee signs out ---------- */
+function selfAutoOn(){ try { const v = localStorage.getItem('self.auto'); return v === null ? true : v === '1'; } catch(e){ return true; } }
+function setSelfAuto(on){ try { localStorage.setItem('self.auto', on ? '1' : '0'); } catch(e){} renderAll(); }
+async function selfFolderHandle(){ try { return await idbGet('self-out-handle'); } catch(e){ return null; } }
+async function selfAutoFlush(reason){
+  if(!SELF_STORE || !SELF_STORE.blob || typeof selfPendingDiff !== 'function') return { ok:false, n:0, where:'' };
+  const rows = selfPendingDiff();
+  if(!rows.length) return { ok:true, n:0, where:'nothing to send' };
+  let pkt = null;
+  try { pkt = await buildChangePacket(); } catch(e){ pkt = null; }
+  if(!pkt) return { ok:false, n:rows.length, where:'packet could not be built' };
+  const emp = (state.employees || [])[0] || {};
+  const base = 'chg-' + String(emp.name || 'employee').replace(/[^A-Za-z0-9]+/g, '-') + '-' + todayYMD() + '-' + String(Date.now()).slice(-5) + '.erchg';
+  let where = '';
+  try {
+    const h = await selfFolderHandle();
+    if(h && h.getFileHandle){
+      let perm = 'granted';
+      try { perm = await h.queryPermission({ mode:'readwrite' }); } catch(e){ perm = 'granted'; }
+      if(perm !== 'granted') perm = await h.requestPermission({ mode:'readwrite' }).catch(function(){ return 'denied'; });
+      if(perm === 'granted'){
+        const fh = await h.getFileHandle(base, { create:true });
+        const w = await fh.createWritable();
+        await w.write(new Blob([pkt], { type:'text/plain' }));
+        await w.close();
+        where = 'ER folder / ' + base;
+      }
+    }
+  } catch(e){ where = ''; }
+  if(!where){ try { downloadText(base, pkt); where = 'downloaded ' + base; } catch(e){ where = ''; } }
+  SELF_STORE.blob.sentAt = nowLocalISO();
+  SELF_STORE.blob.snap = JSON.stringify(pickSelfFields(emp));
+  selfStorePut(SELF_STORE.ic, SELF_STORE.blob);
+  try { logAction('Changes sent automatically', emp.name || '', rows.length + ' field(s) - ' + (reason || 'sign-out') + ' - ' + where, { who:emp.name || 'Employee' }); } catch(e){}
+  return { ok:!!where, n:rows.length, where:where };
+}
+async function exitSelfNow(){
+  const rows = (typeof selfPendingDiff === 'function') ? selfPendingDiff() : [];
+  if(!rows.length || !selfAutoOn()){ selfSignOut(false); return; }
+  const r = await selfAutoFlush('sign-out');
+  selfSignOut(true);
+  toast(r.n ? (r.ok ? 'Sent ' + r.n + ' change(s) to ' + r.where + ' - signed out' : 'Could not send - signed out anyway') : 'Signed out');
+}
+
 function selfSignOut(silent){
   try { if(ROLE === 'self' && state.employees[0]) logAction('Employee signed out', state.employees[0].name, 'Session closed', { who:state.employees[0].name, quiet:true }); } catch(e){}
   try { if(SELF_STORE) persist(); } catch(e){}
@@ -4562,8 +4607,8 @@ function selfSignOut(silent){
   showLock('emp');
   if(!silent) toast('Signed out of your record');
 }
-function exitSelf(){ selfSignOut(false); }
-async function confirmExitSelf(){ selfSignOut(false); }
+function exitSelf(){ exitSelfNow(); }
+async function confirmExitSelf(){ await exitSelfNow(); }
 
 /* keep the old in-app impersonation path honest */
 function selfGateModal(){ accessPanel(); }
